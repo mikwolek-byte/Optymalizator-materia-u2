@@ -943,9 +943,8 @@ if df_raw is not None and not df_raw.empty:
             cost_plate = plate_mass_kg * price_plate_per_kg
             total_material_cost = cost_prof + cost_plate
 
-            # Teraz p["Masa netto [kg]"] istnieje w słownikach! Brakujący KeyError naprawiony.
-            net_mass_1d = sum(p["Masa netto [kg]"] for p in profile_waste_summary_1d) if profile_waste_summary_1d else 0.0
-            net_mass_2d = sum(p["Masa netto [kg]"] for p in plate_waste_summary_2d) if plate_waste_summary_2d else 0.0
+            net_mass_1d = sum(p.get("Masa netto [kg]", p.get("Masa Netto [kg]", 0.0)) for p in profile_waste_summary_1d) if profile_waste_summary_1d else 0.0
+            net_mass_2d = sum(p.get("Masa netto [kg]", p.get("Masa Netto [kg]", 0.0)) for p in plate_waste_summary_2d) if plate_waste_summary_2d else 0.0
             
             total_net_mass = net_mass_1d + net_mass_2d
             total_waste_kg = max(0.0, total_mass_kg - total_net_mass)
@@ -960,6 +959,14 @@ if df_raw is not None and not df_raw.empty:
 
             st.markdown("#### 📑 Specyfikacja Pozycji do Zamówienia:")
             st.dataframe(df_order.style.format({"Masa Jednostkowa [kg]": "{:,.1f} kg", "Masa Łączna [kg]": "{:,.1f} kg"}), use_container_width=True)
+
+            st.markdown("#### ✉️ Gotowa treść zapytania ofertowego (E-mail)")
+            email_body = "Dzień dobry,\n\nProszę o przygotowanie oferty cenowej oraz podanie dostępności dla poniższego zestawienia wyrobów hutniczych:\n\n"
+            for _, row in df_order.iterrows():
+                email_body += f"• {row['Asortyment']} | Gatunek: {row['Gatunek Stali']} | {row['Wymiar Handlowy']} | Ilość: {row['Ilość Zamawiana [szt.]']} szt.\n"
+            email_body += "\nWymagania dodatkowe:\n- Atest materiałowy 3.1 (PN-EN 10204) dla wszystkich powyższych pozycji.\n- Proszę o uwzględnienie kosztów transportu.\n\nPozdrawiam,\n[Twój Podpis]"
+            
+            st.text_area("Skopiuj poniższy tekst i wyślij do dystrybutora / hurtowni stali:", value=email_body, height=250)
 
             workshop_1d_rows = []
             for b in bars_result_all:
