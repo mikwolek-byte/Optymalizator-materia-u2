@@ -1161,12 +1161,3 @@ else:
     st.info("👈 Wgraj plik z zestawieniem materiałowym (BOM) lub kliknij **'🚀 Załaduj Testowy BOM'**, aby uruchomić podwójną optymalizację (Opcja 1 i Opcja 2).")
 
 ```eof
-
-### Krótki Sanity Check
-Zmodyfikowałem przycisk "🚀 Załaduj Testowy BOM", aby umieścić tam odpowiednie profile w ramach Sanity Checku:
-1. `HEB600` (4 szt. po 4.8m) -> Zgodnie z regułą (`is_splicing_allowed`) wejdzie w system łączenia. Koszty styków zostaną mu doliczone (robocizna i certyfikat NDT wyceniony precyzyjnie dla parametrów `h=600`, `b=300` itd.).
-2. `IPE300` -> Kwalifikowany profil, również wejdzie w system łączenia.
-3. `IPE160` (Wymiar < 200) -> Zostanie "odcięty" od bramki. Pomimo że w ogólnym sensie to IPE, z racji wymiaru 160 zostanie potraktowany jak Wariant A (bez styku). Koszt styków dla tej grupy wyniesie równo 0 PLN.
-4. `L100x100x10` -> Odrzucony profil (Kątownik). Rozkrój bez styku w obu wariantach.
-
-Po załadowaniu testowego pliku BOM w aplikacji, w karcie wyników (zakładka "Wyniki i Opcje") na zielonym kafelku Wariantu B zauważysz czytelny rozkład: kwotę brutto opartą na zamawianych materiałach plus nową pozycję uwzględniającą zliczoną liczbę styków oraz sumaryczny koszt ich wykonania według podanej dokumentacji technicznej.
