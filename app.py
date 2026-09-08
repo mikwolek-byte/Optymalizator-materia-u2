@@ -206,9 +206,15 @@ def optimize_1d_single_group(
     trim_cut: float = 40.0,
     start_bar_id: int = 1,
     enable_splicing: bool = False
-) -> List[StockBar]:
-    expanded_cuts: List[Tuple[str, float]] = []
+) -> Tuple[List[StockBar], List[str]]:
     
+    expanded_cuts: List[Tuple[str, float]] = []
+    oversized_marks = set()
+    
+    sorted_stocks = sorted(available_stocks)
+    max_stock_avail = sorted_stocks[-1]
+    stock_bars: List[StockBar] = []
+
     if enable_splicing:
         # Scalenie wszystkich detali (stykowanie w nieskończoną sztangę)
         total_length = 0.0
@@ -221,20 +227,11 @@ def optimize_1d_single_group(
         if total_length > 0:
             combined_mark_str = "Styk(" + "+".join(set(combined_marks)) + ")"
             expanded_cuts.append((combined_mark_str, total_length))
-    else:
-        # Pojedyncze cięcia bez łączenia
-        for it in items:
-            for _ in range(it.quantity):
-                expanded_cuts.append((it.mark, float(it.length)))
-
-    expanded_cuts.sort(key=lambda x: x[1], reverse=True)
-    sorted_stocks = sorted(available_stocks)
-    max_stock_avail = sorted_stocks[-1]
-    stock_bars: List[StockBar] = []
-
-    for mark, cut_len in expanded_cuts:
-        if cut_len + trim_cut > max_stock_avail:
-            if enable_splicing:
+            
+        expanded_cuts.sort(key=lambda x: x[1], reverse=True)
+        
+        for mark, cut_len in expanded_cuts:
+            if cut_len + trim_cut > max_stock_avail:
                 remaining_cut_len = cut_len
                 part_num = 1
                 while remaining_cut_len > 0:
@@ -271,60 +268,108 @@ def optimize_1d_single_group(
                         remaining_cut_len -= take_len
                         part_num += 1
                 continue
+
+            # Standard FFD na krótsze skrawki dla stykowania (jeśli istnieją)
+            best_bar_idx = -1
+            min_remaining_space = float("inf")
+            for i, bar in enumerate(stock_bars):
+                required_space = cut_len + (kerf if len(bar.cuts) > 0 else 0.0)
+                capacity_left = bar.stock_length - (bar.used_length + bar.trim_total)
+                if capacity_left >= required_space:
+                    remaining_after = capacity_left - required_space
+                    if remaining_after < min_remaining_space:
+                        min_remaining_space = remaining_after
+                        best_bar_idx = i
+
+            if best_bar_idx != -1:
+                bar = stock_bars[best_bar_idx]
+                bar.cuts.append((mark, cut_len))
+                bar.used_length += cut_len + kerf
+                bar.kerf_total += kerf
+                bar.scrap_length = max(0.0, bar.stock_length - bar.used_length - bar.trim_total)
             else:
-                oversized_bar = StockBar(
+                eligible_stocks = [s for s in sorted_stocks if (s - trim_cut) >= cut_len]
+                chosen_stock = eligible_stocks[0] if eligible_stocks else max_stock_avail
+                new_bar = StockBar(
                     bar_id=start_bar_id + len(stock_bars),
-                    stock_length=cut_len + trim_cut,
+                    stock_length=chosen_stock,
                     profile=group_key.profile,
                     grade=group_key.grade,
                     used_length=cut_len,
                     cuts=[(mark, cut_len)],
                     kerf_total=0.0,
                     trim_total=trim_cut,
-                    scrap_length=0.0,
-                    is_oversized=True,
+                    scrap_length=max(0.0, chosen_stock - cut_len - trim_cut),
+                    is_oversized=False,
                 )
-                stock_bars.append(oversized_bar)
-                continue
+                stock_bars.append(new_bar)
+                
+    else:
+        # OPCJA BEZ STYKU: Inteligentne dzielenie elementów dłuższych niż najdłuższa sztanga (np. 15.1m)
+        for it in items:
+            for _ in range(it.quantity):
+                expanded_cuts.append((it.mark, float(it.length)))
+                
+        processed_cuts = []
+        for mark, cut_len in expanded_cuts:
+            if cut_len + trim_cut > max_stock_avail:
+                oversized_marks.add(mark)
+                # Dzielenie na bazie standardowej sztangi (12.1m dla HE/IPE, lub 12.0 dla reszty)
+                base_stock = 12100.0 if 12100.0 in available_stocks else 12000.0
+                max_piece = base_stock - trim_cut
+                
+                remaining = cut_len
+                part_idx = 1
+                while remaining > 0:
+                    take = min(remaining, max_piece)
+                    processed_cuts.append((f"{mark}_podz{part_idx}", take))
+                    remaining -= take
+                    part_idx += 1
+            else:
+                processed_cuts.append((mark, cut_len))
+        
+        # Sortowanie po podziale - najdłuższe wchodzą pierwsze
+        processed_cuts.sort(key=lambda x: x[1], reverse=True)
+        
+        # Klasyczny algorytm First Fit Decreasing (FFD)
+        for mark, cut_len in processed_cuts:
+            best_bar_idx = -1
+            min_remaining_space = float("inf")
 
-        best_bar_idx = -1
-        min_remaining_space = float("inf")
+            for i, bar in enumerate(stock_bars):
+                required_space = cut_len + (kerf if len(bar.cuts) > 0 else 0.0)
+                capacity_left = bar.stock_length - (bar.used_length + bar.trim_total)
+                if capacity_left >= required_space:
+                    remaining_after = capacity_left - required_space
+                    if remaining_after < min_remaining_space:
+                        min_remaining_space = remaining_after
+                        best_bar_idx = i
 
-        for i, bar in enumerate(stock_bars):
-            if bar.is_oversized:
-                continue
-            required_space = cut_len + (kerf if len(bar.cuts) > 0 else 0.0)
-            capacity_left = bar.stock_length - (bar.used_length + bar.trim_total)
-            if capacity_left >= required_space:
-                remaining_after = capacity_left - required_space
-                if remaining_after < min_remaining_space:
-                    min_remaining_space = remaining_after
-                    best_bar_idx = i
+            if best_bar_idx != -1:
+                bar = stock_bars[best_bar_idx]
+                bar.cuts.append((mark, cut_len))
+                bar.used_length += cut_len + kerf
+                bar.kerf_total += kerf
+                bar.scrap_length = max(0.0, bar.stock_length - bar.used_length - bar.trim_total)
+            else:
+                # Szukamy najmniejszej pasującej sztangi, w innym przypadku bierzemy maksymalną
+                eligible_stocks = [s for s in sorted_stocks if (s - trim_cut) >= cut_len]
+                chosen_stock = eligible_stocks[0] if eligible_stocks else max_stock_avail
+                new_bar = StockBar(
+                    bar_id=start_bar_id + len(stock_bars),
+                    stock_length=chosen_stock,
+                    profile=group_key.profile,
+                    grade=group_key.grade,
+                    used_length=cut_len,
+                    cuts=[(mark, cut_len)],
+                    kerf_total=0.0,
+                    trim_total=trim_cut,
+                    scrap_length=max(0.0, chosen_stock - cut_len - trim_cut),
+                    is_oversized=False,
+                )
+                stock_bars.append(new_bar)
 
-        if best_bar_idx != -1:
-            bar = stock_bars[best_bar_idx]
-            bar.cuts.append((mark, cut_len))
-            bar.used_length += cut_len + kerf
-            bar.kerf_total += kerf
-            bar.scrap_length = max(0.0, bar.stock_length - bar.used_length - bar.trim_total)
-        else:
-            eligible_stocks = [s for s in sorted_stocks if (s - trim_cut) >= cut_len]
-            chosen_stock = eligible_stocks[0] if eligible_stocks else max_stock_avail
-            new_bar = StockBar(
-                bar_id=start_bar_id + len(stock_bars),
-                stock_length=chosen_stock,
-                profile=group_key.profile,
-                grade=group_key.grade,
-                used_length=cut_len,
-                cuts=[(mark, cut_len)],
-                kerf_total=0.0,
-                trim_total=trim_cut,
-                scrap_length=max(0.0, chosen_stock - cut_len - trim_cut),
-                is_oversized=False,
-            )
-            stock_bars.append(new_bar)
-
-    return stock_bars
+    return stock_bars, list(oversized_marks)
 
 def pack_single_sheet_shelf(
     plate_id: int,
@@ -704,7 +749,7 @@ with col_sample:
             {"Pos": "B1_355", "Profile": "IPE300", "Grade": "S355J2+N", "Length_mm": 5420, "Width_mm": 0, "Thick_mm": 0, "Qty": 6},
             {"Pos": "B2_235", "Profile": "IPE300", "Grade": "S235JR", "Length_mm": 5420, "Width_mm": 0, "Thick_mm": 0, "Qty": 4},
             {"Pos": "C1_355", "Profile": "HEA240", "Grade": "S355J2+N", "Length_mm": 6250, "Width_mm": 0, "Thick_mm": 0, "Qty": 6},
-            {"Pos": "C2_235", "Profile": "HEA240", "Grade": "S235JR", "Length_mm": 4150, "Width_mm": 0, "Thick_mm": 0, "Qty": 4},
+            {"Pos": "OVERSZD", "Profile": "HEA240", "Grade": "S355J2+N", "Length_mm": 18500, "Width_mm": 0, "Thick_mm": 0, "Qty": 1},
             {"Pos": "K1_235", "Profile": "L100x100x10", "Grade": "S235JR", "Length_mm": 2400, "Width_mm": 0, "Thick_mm": 0, "Qty": 12},
             {"Pos": "PL1_355_10", "Profile": "BLACHA #10", "Grade": "S355J2+N", "Length_mm": 1200, "Width_mm": 800, "Thick_mm": 10, "Qty": 8},
         ])
@@ -756,6 +801,7 @@ if df_raw is not None and not df_raw.empty:
     bars_by_group_opt1, bars_by_group_opt2 = {}, {}
     order_items_1d_opt1, order_items_1d_opt2 = [], []
     profile_waste_1d_opt1, profile_waste_1d_opt2 = [], []
+    global_oversized_opt1 = set()
 
     bar_id_1, bar_id_2 = 1, 1
 
@@ -766,7 +812,7 @@ if df_raw is not None and not df_raw.empty:
         sub_netto_mass = (sub_netto_len / 1000.0) * unit_wt
 
         def calc_1d_scenario(enable_splice, bar_id_start):
-            bars = optimize_1d_single_group(group_key, group_items, allowed_stocks, kerf=kerf_1d, trim_cut=trim_1d, start_bar_id=bar_id_start, enable_splicing=enable_splice)
+            bars, oversized_elements = optimize_1d_single_group(group_key, group_items, allowed_stocks, kerf=kerf_1d, trim_cut=trim_1d, start_bar_id=bar_id_start, enable_splicing=enable_splice)
             stock_counts: Dict[float, int] = {}
             sub_purchased_len = 0.0
             for b in bars:
@@ -803,18 +849,19 @@ if df_raw is not None and not df_raw.empty:
                 "Odpad [kg]": round(sub_scrap_mass_kg, 1),
                 "Odpad [%]": round(sub_scrap_pct, 2),
             }
-            return bars, order_list, waste_dict
+            return bars, order_list, waste_dict, oversized_elements
 
         # Obliczanie Opcji 1 (Bez Styku)
-        b1, o1, w1 = calc_1d_scenario(False, bar_id_1)
+        b1, o1, w1, over_opt1 = calc_1d_scenario(False, bar_id_1)
         bars_opt1.extend(b1)
         bars_by_group_opt1[group_key] = b1
         order_items_1d_opt1.extend(o1)
         profile_waste_1d_opt1.append(w1)
+        global_oversized_opt1.update(over_opt1)
         bar_id_1 += len(b1)
 
         # Obliczanie Opcji 2 (Ze Stykiem)
-        b2, o2, w2 = calc_1d_scenario(True, bar_id_2)
+        b2, o2, w2, _ = calc_1d_scenario(True, bar_id_2)
         bars_opt2.extend(b2)
         bars_by_group_opt2[group_key] = b2
         order_items_1d_opt2.extend(o2)
@@ -883,6 +930,9 @@ if df_raw is not None and not df_raw.empty:
 
     with tab_procure:
         st.markdown("### 🛒 Zestawienie Opcji Zakupowych (Handlowe RFQ)")
+        
+        if global_oversized_opt1:
+            st.warning(f"⚠️ **Wymagana Akceptacja Technologiczna (dla Opcji 1):** Następujące pozycje przekraczały maksymalne długości handlowe (np. 15.1m lub 12.0m) i zostały automatycznie podzielone na krótsze odcinki, aby zmieścić się w bazowych sztangach: **{', '.join(global_oversized_opt1)}**. Prosimy o potwierdzenie proponowanego podziału u Klienta.")
         
         order_opt1 = order_items_1d_opt1 + order_items_2d
         df_order_opt1 = pd.DataFrame(order_opt1)
