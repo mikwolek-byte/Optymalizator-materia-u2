@@ -611,11 +611,10 @@ def parse_bom_file(uploaded_file) -> pd.DataFrame:
     for engine in ['openpyxl', 'xlrd', None]:
         try:
             df_temp = pd.read_excel(io.BytesIO(raw_bytes), header=None, engine=engine) if engine else pd.read_excel(io.BytesIO(raw_bytes), header=None)
-            # Znajdź wiersz nagłówkowy w arkuszu SAP
             h_idx = 0
             for idx, r in df_temp.iterrows():
                 row_str = " ".join([str(v).lower() for v in r if v is not None])
-                if "profil" in row_str or "position" in row_str or "długość" in row_str or "length" in row_str:
+                if "profil" in row_str or "position" in row_str or "długość" in row_str or "length" in row_str or "länge" in row_str:
                     h_idx = idx
                     break
             df_temp.columns = [str(c).strip() for c in df_temp.iloc[h_idx]]
@@ -640,11 +639,11 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
             col_map[col] = 'mark'
         elif any(k in c_clean for k in ['profil', 'profile', 'przekrój', 'section']) and 'profile' not in col_map.values():
             col_map[col] = 'profile'
-        elif any(k in c_clean for k in ['materiał', 'material', 'gatunek', 'grade']) and 'grade' not in col_map.values():
+        elif any(k in c_clean for k in ['materiał', 'material', 'gatunek', 'grade', 'güte']) and 'grade' not in col_map.values():
             col_map[col] = 'grade'
-        elif any(k in c_clean for k in ['ilość', 'ilosc', 'quantity', 'qty', 'szt']) and 'qty' not in col_map.values():
+        elif any(k in c_clean for k in ['ilość', 'ilosc', 'quantity', 'qty', 'szt', 'stk']) and 'qty' not in col_map.values():
             col_map[col] = 'qty'
-        elif any(k in c_clean for k in ['długość', 'dlugosc', 'length', 'l [mm]']) and not any(k in c_clean for k in ['całk', 'total']) and 'length' not in col_map.values():
+        elif any(k in c_clean for k in ['długość', 'dlugosc', 'length', 'l [mm]', 'länge']) and not any(k in c_clean for k in ['całk', 'total', 'ges.']) and 'length' not in col_map.values():
             col_map[col] = 'length'
         elif any(k in c_clean for k in ['szerokość', 'szerokosc', 'width', 'b [mm]']) and not any(k in c_clean for k in ['całk', 'total']) and 'width' not in col_map.values():
             col_map[col] = 'width'
@@ -660,9 +659,9 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
         len_val = str(row.get('length', '')).strip()
         qty_val = str(row.get('qty', '1')).strip()
 
-        if any(w in mark_val.lower() for w in ['suma', 'total']) or any(w in len_val.lower() for w in ['suma', 'total']):
+        if any(w in mark_val.lower() for w in ['suma', 'total', 'summe']) or any(w in len_val.lower() for w in ['suma', 'total', 'summe']):
             continue
-        if prof_val in ['', 'None', 'nan']:
+        if prof_val in ['', 'None', 'nan'] or mark_val in ['', 'None', 'nan']:
             continue
 
         try:
@@ -677,20 +676,24 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
             
             grd = str(row.get('grade', 'S355J2+N')).strip()
 
-            if (w == 0.0 or t == 0.0) and any(p_sub in prof_val.upper() for p_sub in ["PL", "BL", "BLACHA", "#", "-"]):
-                m_dim = re.search(r'(?:PL|BL|BLACHA|#|-)?\s*(\d+(?:\.\d+)?)\s*[X*x]\s*(\d+(?:\.\d+)?)', prof_val.upper())
+            is_plate_profile = any(p_sub in prof_val.upper() for p_sub in ["PL", "BL", "BLACHA", "#", "-"])
+            if (w == 0.0 or t == 0.0) and is_plate_profile:
+                m_dim = re.search(r'(?:PL|BL|BLACHA|#|-)?\s*(\d+(?:\.\d+)?)\s*[\*Xx]\s*(\d+(?:\.\d+)?)', prof_val.upper())
                 if m_dim:
                     t = float(m_dim.group(1))
                     w = float(m_dim.group(2))
 
-            if q > 0 and (l > 0 or w > 0):
+            is_struct = not is_plate_profile
+            valid = (is_struct and l > 0) or (not is_struct and l > 0 and w > 0 and t > 0) or (not is_struct and l > 0 and (w > 0 or t > 0))
+
+            if q > 0 and valid:
                 clean_rows.append({
-                    "mark": mark_val if mark_val not in ['', 'None', 'nan'] else f"P{len(clean_rows)+1}",
+                    "mark": mark_val,
                     "profile": prof_val,
                     "grade": grd,
                     "length": l,
-                    "width": w,
-                    "thick": t,
+                    "width": w if w > 0 else 200.0,
+                    "thick": t if t > 0 else 10.0,
                     "qty": q,
                 })
         except (ValueError, TypeError) as e:
