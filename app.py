@@ -142,6 +142,12 @@ class Item1D:
     grade: str
     quantity: int = 1
 
+@dataclass(frozen=True)
+class PlateFormat:
+    name: str
+    width: float
+    length: float
+
 @dataclass
 class StockBar:
     bar_id: int
@@ -182,6 +188,7 @@ class StockPlate:
     packed_items: List[PackedRect] = field(default_factory=list)
     used_area: float = 0.0
     scrap_area: float = 0.0
+    format_name: str = ""
 
 def normalize_grade(raw_grade: str) -> str:
     if not raw_grade or pd.isna(raw_grade) or str(raw_grade).strip().lower() in ['nan', 'none', '']:
@@ -327,15 +334,202 @@ def optimize_1d_single_group(
 
     return stock_bars
 
+def pack_single_sheet_shelf(
+    plate_id: int,
+    grade: str,
+    thickness: float,
+    fmt: PlateFormat,
+    parts: List[Tuple[str, float, float]],
+    kerf_spacing: float,
+    edge_margin: float,
+) -> Tuple[StockPlate, List[Tuple[str, float, float]]]:
+    """Próbuje upakować jak najwięcej części na pojedynczym arkuszu o zadanym formacie."""
+    effective_w = fmt.width - 2.0 * edge_margin
+    effective_l = fmt.length - 2.0 * edge_margin
+
+    plate = StockPlate(
+        plate_id=plate_id,
+        grade=grade,
+        thickness=thickness,
+        stock_w=fmt.width,
+        stock_l=fmt.length,
+        packed_items=[],
+        used_area=0.0,
+        scrap_area=0.0,
+        format_name=fmt.name,
+    )
+
+    if effective_w <= 0 or effective_l <= 0 or not parts:
+        return plate, list(parts)
+
+    shelves: List[Dict[str, float]] = []
+    unplaced_parts: List[Tuple[str, float, float]] = []
+
+    for mark, pw, pl in parts:
+        placed = False
+        orientations = [(pw, pl), (pl, pw)] if pw != pl else [(pw, pl)]
+
+        for o_w, o_l in orientations:
+            if o_w > effective_w or o_l > effective_l:
+                continue
+
+            # Sprawdzenie istniejących półek nestingowych
+            for shelf in shelves:
+                if o_l <= shelf["height"] and (shelf["current_x"] + o_w) <= effective_w:
+                    x = edge_margin + shelf["current_x"]
+                    y = edge_margin + shelf["y"]
+                    plate.packed_items.append(PackedRect(mark=mark, x=x, y=y, w=o_w, h=o_l))
+                    shelf["current_x"] += o_w + kerf_spacing
+                    plate.used_area += (o_w * o_l)
+                    placed = True
+                    break
+            if placed:
+                break
+
+            # Otwarcie nowej półki na arkuszu
+            last_y_end = shelves[-1]["y"] + shelves[-1]["height"] + kerf_spacing if shelves else 0.0
+            if (last_y_end + o_l) <= effective_l and o_w <= effective_w:
+                new_shelf = {"y": last_y_end, "height": o_l, "current_x": o_w + kerf_spacing}
+                shelves.append(new_shelf)
+                x = edge_margin
+                y = edge_margin + last_y_end
+                plate.packed_items.append(PackedRect(mark=mark, x=x, y=y, w=o_w, h=o_l))
+                plate.used_area += (o_w * o_l)
+                placed = True
+                break
+
+        if not placed:
+            unplaced_parts.append((mark, pw, pl))
+
+    total_sheet_area = fmt.width * fmt.length
+    plate.scrap_area = max(0.0, total_sheet_area - plate.used_area)
+    return plate, unplaced_parts
+
+def simulate_uniform_format_nesting(
+    group_key: PlateGroupKey,
+    parts_list: List[Tuple[str, float, float]],
+    fmt: PlateFormat,
+    kerf_spacing: float,
+    edge_margin: float,
+    start_plate_id: int,
+) -> Optional[List[StockPlate]]:
+    """Symuluje rozkrój całej grupy przy użyciu wyłącznie jednego zadanego formatu arkusza."""
+    effective_w = fmt.width - 2.0 * edge_margin
+    effective_l = fmt.length - 2.0 * edge_margin
+
+    # Weryfikacja wykonalności: żaden detal nie może przekraczać wymiaru efektywnego
+    for _, pw, pl in parts_list:
+        fits_normal = (pw <= effective_w and pl <= effective_l)
+        fits_rotated = (pl <= effective_w and pw <= effective_l)
+        if not (fits_normal or fits_rotated):
+            return None
+
+    plates: List[StockPlate] = []
+    remaining = list(parts_list)
+    curr_id = start_plate_id
+
+    while remaining:
+        plate, unplaced = pack_single_sheet_shelf(
+            plate_id=curr_id,
+            grade=group_key.grade,
+            thickness=group_key.thickness,
+            fmt=fmt,
+            parts=remaining,
+            kerf_spacing=kerf_spacing,
+            edge_margin=edge_margin,
+        )
+        if not plate.packed_items:
+            return None
+        plates.append(plate)
+        curr_id += 1
+        remaining = unplaced
+
+    return plates
+
+def simulate_adaptive_mixed_nesting(
+    group_key: PlateGroupKey,
+    parts_list: List[Tuple[str, float, float]],
+    candidate_formats: List[PlateFormat],
+    kerf_spacing: float,
+    edge_margin: float,
+    start_plate_id: int,
+) -> List[StockPlate]:
+    """Dynamicznie dobiera najlepszy format arkusza na każdym kroku rozkroju."""
+    plates: List[StockPlate] = []
+    remaining = list(parts_list)
+    curr_id = start_plate_id
+
+    while remaining:
+        best_plate: Optional[StockPlate] = None
+        best_unplaced: List[Tuple[str, float, float]] = []
+        best_score = -float("inf")
+
+        # Sprawdzenie czy wszystkie pozostałe detale mieszczą się na którymś arkuszu (faza końcowa)
+        candidate_results = []
+        for fmt in candidate_formats:
+            p, unplaced = pack_single_sheet_shelf(
+                plate_id=curr_id,
+                grade=group_key.grade,
+                thickness=group_key.thickness,
+                fmt=fmt,
+                parts=remaining,
+                kerf_spacing=kerf_spacing,
+                edge_margin=edge_margin,
+            )
+            if p.packed_items:
+                candidate_results.append((fmt, p, unplaced))
+
+        if not candidate_results:
+            # Sytuacja awaryjna: detal ponadgabarytowy
+            largest_fmt = max(candidate_formats, key=lambda f: f.width * f.length)
+            mark, pw, pl = remaining.pop(0)
+            custom_plate = StockPlate(
+                plate_id=curr_id,
+                grade=group_key.grade,
+                thickness=group_key.thickness,
+                stock_w=max(pw + 2 * edge_margin, largest_fmt.width),
+                stock_l=max(pl + 2 * edge_margin, largest_fmt.length),
+                packed_items=[PackedRect(mark=mark, x=edge_margin, y=edge_margin, w=pw, h=pl)],
+                used_area=pw * pl,
+                scrap_area=0.0,
+                format_name="Arkusz Niestandardowy (Ponadgabaryt)",
+            )
+            custom_plate.scrap_area = max(0.0, (custom_plate.stock_w * custom_plate.stock_l) - custom_plate.used_area)
+            plates.append(custom_plate)
+            curr_id += 1
+            continue
+
+        # Kryterium wyboru:
+        # 1. Jeśli arkusz mieści WSZYSTKIE pozostałe detale, wybieramy ten o najmniejszym odpadzie (najmniejszy dopasowany arkusz).
+        finishing_candidates = [c for c in candidate_results if len(c[2]) == 0]
+        if finishing_candidates:
+            # Minimalizacja odpadu bezwzględnego [m²] na ostatnim arkuszu
+            finishing_candidates.sort(key=lambda c: c[1].scrap_area)
+            chosen_fmt, chosen_plate, chosen_unplaced = finishing_candidates[0]
+        else:
+            # 2. Jeśli detale nie mieszczą się w całości, wybieramy arkusz o najwyższym wskaźniku upakowania (yield)
+            candidate_results.sort(
+                key=lambda c: (c[1].used_area / (c[0].width * c[0].length)),
+                reverse=True
+            )
+            chosen_fmt, chosen_plate, chosen_unplaced = candidate_results[0]
+
+        plates.append(chosen_plate)
+        curr_id += 1
+        remaining = chosen_unplaced
+
+    return plates
+
 def optimize_2d_single_group(
     group_key: PlateGroupKey,
     items: List[PlateItem],
-    stock_w: float,
-    stock_l: float,
+    available_formats: List[PlateFormat],
     kerf_spacing: float = 12.0,
     edge_margin: float = 20.0,
+    allow_mixed_formats: bool = True,
     start_plate_id: int = 1,
 ) -> List[StockPlate]:
+    """Wielowariantowa symulacja i selekcja optymalnego planu rozkroju 2D pod kątem min. odpadu."""
     parts: List[Tuple[str, float, float]] = []
     for it in items:
         for _ in range(it.quantity):
@@ -345,67 +539,58 @@ def optimize_2d_single_group(
 
     parts.sort(key=lambda p: (p[1] * p[2]), reverse=True)
 
-    effective_w = stock_w - 2.0 * edge_margin
-    effective_l = stock_l - 2.0 * edge_margin
+    if not parts or not available_formats:
+        return []
 
-    plates: List[StockPlate] = []
-    if effective_w <= 0 or effective_l <= 0 or not parts:
-        return plates
+    candidate_runs: List[List[StockPlate]] = []
 
-    plate_shelves: List[List[Dict[str, float]]] = []
+    # 1. Przetestowanie każdego wybranego formatu jednorodnego
+    for fmt in available_formats:
+        run_res = simulate_uniform_format_nesting(
+            group_key=group_key,
+            parts_list=parts,
+            fmt=fmt,
+            kerf_spacing=kerf_spacing,
+            edge_margin=edge_margin,
+            start_plate_id=start_plate_id,
+        )
+        if run_res is not None:
+            candidate_runs.append(run_res)
 
-    for mark, pw, pl in parts:
-        placed = False
-        orientations = [(pw, pl), (pl, pw)]
+    # 2. Przetestowanie strategii adaptacyjnej (miksowanie formatów)
+    if allow_mixed_formats and len(available_formats) > 1:
+        mixed_run = simulate_adaptive_mixed_nesting(
+            group_key=group_key,
+            parts_list=parts,
+            candidate_formats=available_formats,
+            kerf_spacing=kerf_spacing,
+            edge_margin=edge_margin,
+            start_plate_id=start_plate_id,
+        )
+        if mixed_run:
+            candidate_runs.append(mixed_run)
 
-        for p_idx, plate in enumerate(plates):
-            shelves = plate_shelves[p_idx]
-            for o_w, o_l in orientations:
-                for shelf in shelves:
-                    if o_l <= shelf["height"] and (shelf["current_x"] + o_w) <= effective_w:
-                        x = edge_margin + shelf["current_x"]
-                        y = edge_margin + shelf["y"]
-                        plate.packed_items.append(PackedRect(mark=mark, x=x, y=y, w=o_w, h=o_l))
-                        shelf["current_x"] += o_w + kerf_spacing
-                        plate.used_area += (o_w * o_l)
-                        placed = True
-                        break
-                if placed:
-                    break
+    if not candidate_runs:
+        # Fallback na największy dostępny format
+        largest_fmt = max(available_formats, key=lambda f: f.width * f.length)
+        return simulate_adaptive_mixed_nesting(
+            group_key=group_key,
+            parts_list=parts,
+            candidate_formats=[largest_fmt],
+            kerf_spacing=kerf_spacing,
+            edge_margin=edge_margin,
+            start_plate_id=start_plate_id,
+        )
 
-                last_y_end = shelves[-1]["y"] + shelves[-1]["height"] + kerf_spacing if shelves else 0.0
-                if not placed and (last_y_end + o_l) <= effective_l and o_w <= effective_w:
-                    new_shelf = {"y": last_y_end, "height": o_l, "current_x": o_w + kerf_spacing}
-                    shelves.append(new_shelf)
-                    x = edge_margin
-                    y = edge_margin + last_y_end
-                    plate.packed_items.append(PackedRect(mark=mark, x=x, y=y, w=o_w, h=o_l))
-                    plate.used_area += (o_w * o_l)
-                    placed = True
-                    break
-            if placed:
-                break
+    # Wybór planu o bezwzględnie najmniejszym odpadzie powierzchniowym (min scrap_area)
+    def evaluate_run(run: List[StockPlate]) -> Tuple[float, float, int]:
+        total_scrap = sum(p.scrap_area for p in run)
+        total_gross = sum(p.stock_w * p.stock_l for p in run)
+        yield_pct = (sum(p.used_area for p in run) / total_gross * 100.0) if total_gross > 0 else 0.0
+        return (total_scrap, -yield_pct, len(run))
 
-        if not placed:
-            best_w, best_l = (pw, pl) if (pw <= effective_w and pl <= effective_l) else (pl, pw)
-            new_plate = StockPlate(
-                plate_id=start_plate_id + len(plates),
-                grade=group_key.grade,
-                thickness=group_key.thickness,
-                stock_w=stock_w,
-                stock_l=stock_l,
-                packed_items=[PackedRect(mark=mark, x=edge_margin, y=edge_margin, w=best_w, h=best_l)],
-                used_area=(best_w * best_l),
-                scrap_area=0.0,
-            )
-            plates.append(new_plate)
-            plate_shelves.append([{"y": 0.0, "height": best_l, "current_x": best_w + kerf_spacing}])
-
-    for pl in plates:
-        total_plate_area = pl.stock_w * pl.stock_l
-        pl.scrap_area = max(0.0, total_plate_area - pl.used_area)
-
-    return plates
+    candidate_runs.sort(key=evaluate_run)
+    return candidate_runs[0]
 
 def parse_bom_file(uploaded_file) -> pd.DataFrame:
     raw_bytes = uploaded_file.getvalue()
@@ -563,62 +748,6 @@ def plot_1d_cutting_plan(bars: List[StockBar], title_suffix: str = "") -> plt.Fi
     plt.tight_layout()
     return fig
 
-def plot_2d_plate_plan(plate: StockPlate) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(10, 4.8), dpi=120)
-    sheet_rect = patches.Rectangle((0, 0), plate.stock_l, plate.stock_w,
-                                   linewidth=1.5, edgecolor="#0F172A", facecolor="#F8FAFC")
-    ax.add_patch(sheet_rect)
-
-    colors = ["#2563EB", "#0D9488", "#EA580C", "#7C3AED", "#16A34A", "#0284C7", "#DC2626", "#D97706"]
-    for idx, item in enumerate(plate.packed_items):
-        color = colors[idx % len(colors)]
-        r = patches.Rectangle((item.y, item.x), item.h, item.w,
-                              linewidth=1.0, edgecolor="#0F172A", facecolor=color, alpha=0.88)
-        ax.add_patch(r)
-        if item.h > 120 and item.w > 80:
-            ax.text(item.y + item.h / 2, item.x + item.w / 2,
-                    f"{item.mark}\n{item.h:.0f}×{item.w:.0f}",
-                    color="white", fontsize=7.5, ha="center", va="center", weight="bold")
-
-    margin_x = plate.stock_l * 0.03
-    margin_y = plate.stock_w * 0.05
-    ax.set_xlim(-margin_x, plate.stock_l + margin_x)
-    ax.set_ylim(-margin_y, plate.stock_w + margin_y)
-    ax.set_aspect("equal")
-    ax.set_xlabel("Długość arkusza [mm]", fontsize=9, fontweight="bold")
-    ax.set_ylabel("Szerokość arkusza [mm]", fontsize=9, fontweight="bold")
-    eff = (plate.used_area / (plate.stock_w * plate.stock_l)) * 100.0 if (plate.stock_w * plate.stock_l) > 0 else 0.0
-    ax.set_title(
-        f"Arkusz #{plate.plate_id} | Grubość: #{plate.thickness:.0f}mm {plate.grade} "
-        f"({plate.stock_w:.0f}×{plate.stock_l:.0f} mm) | Wykorzystanie: {eff:.1f}% | Formatek: {len(plate.packed_items)} szt.",
-        fontsize=10, fontweight="bold", pad=8
-    )
-    plt.tight_layout()
-    return fig
-
-def build_excel_export(
-    procurement_df: pd.DataFrame,
-    cut_summary_1d: pd.DataFrame,
-    cut_summary_2d: pd.DataFrame,
-    stats_df: pd.DataFrame,
-    profile_stats_1d: Optional[pd.DataFrame] = None,
-    plate_stats_2d: Optional[pd.DataFrame] = None,
-) -> io.BytesIO:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        procurement_df.to_excel(writer, sheet_name="Zapytanie Ofertowe RFQ", index=False)
-        if profile_stats_1d is not None and not profile_stats_1d.empty:
-            profile_stats_1d.to_excel(writer, sheet_name="Konsolidacja Profili 1D", index=False)
-        if plate_stats_2d is not None and not plate_stats_2d.empty:
-            plate_stats_2d.to_excel(writer, sheet_name="Konsolidacja Blach 2D", index=False)
-        if not cut_summary_1d.empty:
-            cut_summary_1d.to_excel(writer, sheet_name="Karty Cięcia Sztang 1D", index=False)
-        if not cut_summary_2d.empty:
-            cut_summary_2d.to_excel(writer, sheet_name="Karty Nestingu Blach 2D", index=False)
-        stats_df.to_excel(writer, sheet_name="Ekonomia i Odpad", index=False)
-    output.seek(0)
-    return output
-
 st.title("🏗️ SteelOpt: Optymalizator Rozkroju i Generator RFQ")
 st.caption("Precyzyjne planowanie cięcia hutniczego | Izolacja gatunków stali | Generator Zamówień i Zapytania Ofertowego")
 
@@ -633,24 +762,46 @@ with st.sidebar:
     trim_1d = st.number_input("Naddatek obcięcia końcówki [mm]", min_value=0.0, max_value=150.0, value=40.0, step=5.0)
     stock_options_1d = st.multiselect(
         "Dostępne sztangi handlowe [mm]:",
-        options=[6000.0, 10000.0, 12000.0, 12100.0, 14000.0, 15000.0, 18000.0],
-        default=[12000.0, 12100.0, 14000.0, 15000.0]
+        options=[6000.0, 10000.0, 12000.0, 12100.0, 14000.0, 15000.0, 15100.0, 18000.0],
+        default=[6000.0, 12100.0, 15100.0],
+        help="Standardowe długości hutnicze: 6.0m (dla mniejszych profili/ceowników/kątowników), 12.1m oraz 15.1m (belki główne)."
     )
     if not stock_options_1d:
-        stock_options_1d = [12000.0]
+        stock_options_1d = [12100.0]
 
     st.divider()
     st.subheader("Parametry Rozkroju 2D (Arkusze)")
     kerf_2d = st.number_input("Odstęp termiczny palnika [mm]", min_value=2.0, max_value=30.0, value=12.0, step=1.0)
     margin_2d = st.number_input("Margines brzegowy arkusza [mm]", min_value=5.0, max_value=50.0, value=20.0, step=5.0)
-    plate_formats = {
+    
+    PLATE_FORMAT_CATALOG: Dict[str, Tuple[float, float]] = {
         "1500 × 3000 mm": (1500.0, 3000.0),
         "1500 × 6000 mm": (1500.0, 6000.0),
         "2000 × 6000 mm": (2000.0, 6000.0),
         "2000 × 12000 mm": (2000.0, 12000.0),
+        "2500 × 6000 mm": (2500.0, 6000.0),
+        "2500 × 12000 mm": (2500.0, 12000.0),
     }
-    selected_format_label = st.selectbox("Format arkusza handlowego:", list(plate_formats.keys()), index=2)
-    sel_plate_w, sel_plate_l = plate_formats[selected_format_label]
+    
+    selected_format_labels = st.multiselect(
+        "Dostępne formaty arkuszy handlowych:",
+        options=list(PLATE_FORMAT_CATALOG.keys()),
+        default=["1500 × 3000 mm", "1500 × 6000 mm", "2000 × 6000 mm", "2000 × 12000 mm"],
+        help="Zaznacz wszystkie formaty, jakimi dysponuje lub które może dostarczyć huta/dystrybutor. Algorytm dokona doboru optymalnego."
+    )
+    if not selected_format_labels:
+        selected_format_labels = ["2000 × 6000 mm"]
+
+    allow_mixed_formats = st.checkbox(
+        "Zezwalaj na miksowanie formatów w grupie (optymalizacja hybrydowa)",
+        value=True,
+        help="Pozwala dobrać duży arkusz dla głównej partii i mniejszy na domiar, minimalizując zakup pustych powierzchni."
+    )
+    
+    available_plate_formats = [
+        PlateFormat(name=lbl, width=PLATE_FORMAT_CATALOG[lbl][0], length=PLATE_FORMAT_CATALOG[lbl][1])
+        for lbl in selected_format_labels
+    ]
 
     st.divider()
     st.subheader("💰 Wycena Szacunkowa (Koszty)")
@@ -807,55 +958,64 @@ if df_raw is not None and not df_raw.empty:
     plate_waste_summary_2d: List[Dict] = []
 
     plate_id_counter = 1
-    single_sheet_area_m2 = (sel_plate_w * sel_plate_l) / 1_000_000.0
 
     for group_key, group_items in grouped_2d_dict.items():
         plates = optimize_2d_single_group(
             group_key=group_key,
             items=group_items,
-            stock_w=sel_plate_w,
-            stock_l=sel_plate_l,
+            available_formats=available_plate_formats,
             kerf_spacing=kerf_2d,
             edge_margin=margin_2d,
+            allow_mixed_formats=allow_mixed_formats,
             start_plate_id=plate_id_counter,
         )
         plate_id_counter += len(plates)
         plates_result_all.extend(plates)
         plates_by_group[group_key] = plates
 
-        num_sheets = len(plates)
-        gross_area_m2 = num_sheets * single_sheet_area_m2
-        net_area_m2 = sum((it.width * it.length * it.quantity) for it in group_items) / 1_000_000.0
+        # Agregacja zamówienia z podziałem na dobrane formaty handlowe
+        format_aggregation: Dict[Tuple[float, float, str], int] = {}
+        for pl in plates:
+            fmt_key = (pl.stock_w, pl.stock_l, pl.format_name or f"{pl.stock_w:.0f} × {pl.stock_l:.0f} mm")
+            format_aggregation[fmt_key] = format_aggregation.get(fmt_key, 0) + 1
 
-        single_sheet_mass_kg = single_sheet_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
-        gross_mass_kg = num_sheets * single_sheet_mass_kg
-        net_mass_kg = net_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
-        waste_area_m2 = max(0.0, gross_area_m2 - net_area_m2)
-        waste_mass_kg = max(0.0, gross_mass_kg - net_mass_kg)
-        waste_pct = (waste_area_m2 / gross_area_m2 * 100.0) if gross_area_m2 > 0 else 0.0
+        sub_gross_area_m2 = sum((pl.stock_w * pl.stock_l) / 1_000_000.0 for pl in plates)
+        sub_net_area_m2 = sum((it.width * it.length * it.quantity) for it in group_items) / 1_000_000.0
+        
+        for (f_w, f_l, f_name), count_sheets in format_aggregation.items():
+            single_sheet_area = (f_w * f_l) / 1_000_000.0
+            single_mass_kg = single_sheet_area * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
+            tot_format_mass_kg = count_sheets * single_mass_kg
+            
+            order_items_unified.append({
+                "Kategoria": "Blacha gruba (2D)",
+                "Asortyment": f"Blacha #{group_key.thickness:.0f} mm",
+                "Gatunek Stali": group_key.grade,
+                "Wymiar Handlowy": f"{f_w:.0f} × {f_l:.0f} mm",
+                "Ilość Zamawiana [szt.]": count_sheets,
+                "Masa Jednostkowa [kg]": round(single_mass_kg, 1),
+                "Masa Łączna [kg]": round(tot_format_mass_kg, 1),
+                "Wymagany Atest": "3.1 wg PN-EN 10204",
+            })
 
-        order_items_unified.append({
-            "Kategoria": "Blacha gruba (2D)",
-            "Asortyment": f"Blacha #{group_key.thickness:.0f} mm",
-            "Gatunek Stali": group_key.grade,
-            "Wymiar Handlowy": f"{sel_plate_w:.0f} × {sel_plate_l:.0f} mm",
-            "Ilość Zamawiana [szt.]": num_sheets,
-            "Masa Jednostkowa [kg]": round(single_sheet_mass_kg, 1),
-            "Masa Łączna [kg]": round(gross_mass_kg, 1),
-            "Wymagany Atest": "3.1 wg PN-EN 10204",
-        })
+        sub_gross_mass_kg = sub_gross_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
+        sub_net_mass_kg = sub_net_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
+        sub_waste_mass_kg = max(0.0, sub_gross_mass_kg - sub_net_mass_kg)
+        sub_waste_pct = ((sub_gross_area_m2 - sub_net_area_m2) / sub_gross_area_m2 * 100.0) if sub_gross_area_m2 > 0 else 0.0
+
+        format_summary_str = ", ".join([f"{cnt}× ({f_w:.0f}×{f_l:.0f})" for (f_w, f_l, _), cnt in format_aggregation.items()])
 
         plate_waste_summary_2d.append({
             "Grubość [mm]": group_key.thickness,
             "Gatunek": group_key.grade,
-            "Liczba arkuszy [szt.]": num_sheets,
-            "Format arkusza [mm]": f"{sel_plate_w:.0f} × {sel_plate_l:.0f}",
-            "Powierzchnia netto [m²]": round(net_area_m2, 2),
-            "Powierzchnia brutto [m²]": round(gross_area_m2, 2),
-            "Masa netto [kg]": round(net_mass_kg, 1),
-            "Masa brutto [kg]": round(gross_mass_kg, 1),
-            "Odpad [kg]": round(waste_mass_kg, 1),
-            "Odpad [%]": round(waste_pct, 2),
+            "Liczba arkuszy [szt.]": len(plates),
+            "Dobrane formaty": format_summary_str,
+            "Powierzchnia netto [m²]": round(sub_net_area_m2, 2),
+            "Powierzchnia brutto [m²]": round(sub_gross_area_m2, 2),
+            "Masa netto [kg]": round(sub_net_mass_kg, 1),
+            "Masa brutto [kg]": round(sub_gross_mass_kg, 1),
+            "Odpad [kg]": round(sub_waste_mass_kg, 1),
+            "Odpad [%]": round(sub_waste_pct, 2),
         })
 
     tab_procure, tab_1d_view, tab_2d_view, tab_source = st.tabs([
