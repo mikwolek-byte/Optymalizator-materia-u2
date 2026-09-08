@@ -20,7 +20,6 @@ st.set_page_config(
 
 STEEL_DENSITY_KG_M3 = 7850.0  # Gęstość objętościowa stali konstrukcyjnej [kg/m³]
 
-# Masy jednostkowe
 EURO_PROFILE_WEIGHTS: Dict[str, float] = {
     "IPE80": 6.0, "IPE100": 8.1, "IPE120": 10.4, "IPE140": 12.9, "IPE160": 15.8,
     "IPE180": 18.8, "IPE200": 22.4, "IPE220": 26.2, "IPE240": 30.7, "IPE270": 36.1,
@@ -47,16 +46,12 @@ EURO_PROFILE_WEIGHTS: Dict[str, float] = {
     "UNP400": 71.8,
 }
 
-# Geometria Kwalifikowanych Profili do stykowania (wymiary w mm: h, b, tw, tf)
-# Służy do precyzyjnego wyliczania długości i liczby ściegów spawalniczych
 PROFILE_DIMENSIONS: Dict[str, Tuple[float, float, float, float]] = {
-    # IPE
     "IPE220": (220, 110, 5.9, 9.2), "IPE240": (240, 120, 6.2, 9.8),
     "IPE270": (270, 135, 6.6, 10.2), "IPE300": (300, 150, 7.1, 10.7),
     "IPE330": (330, 160, 7.5, 11.5), "IPE360": (360, 170, 8.0, 12.7),
     "IPE400": (400, 180, 8.6, 13.5), "IPE450": (450, 190, 9.4, 14.6),
     "IPE500": (500, 200, 10.2, 16.0), "IPE550": (550, 210, 11.1, 17.2), "IPE600": (600, 220, 12.0, 19.0),
-    # HEA
     "HEA220": (210, 220, 7.0, 11.0), "HEA240": (230, 240, 7.5, 12.0),
     "HEA260": (250, 260, 7.5, 12.5), "HEA280": (270, 280, 8.0, 13.0),
     "HEA300": (290, 300, 8.5, 14.0), "HEA320": (310, 300, 9.0, 15.5),
@@ -65,7 +60,6 @@ PROFILE_DIMENSIONS: Dict[str, Tuple[float, float, float, float]] = {
     "HEA500": (490, 300, 12.0, 23.0), "HEA550": (540, 300, 12.5, 24.0), "HEA600": (590, 300, 13.0, 25.0),
     "HEA650": (640, 300, 13.5, 26.0), "HEA700": (690, 300, 14.5, 27.0),
     "HEA800": (790, 300, 15.0, 28.0), "HEA900": (890, 300, 16.0, 30.0), "HEA1000": (990, 300, 16.5, 31.0),
-    # HEB
     "HEB220": (220, 220, 9.5, 16.0), "HEB240": (240, 240, 10.0, 17.0),
     "HEB260": (260, 260, 10.0, 17.5), "HEB280": (280, 280, 10.5, 18.0),
     "HEB300": (300, 300, 11.0, 19.0), "HEB320": (320, 300, 11.5, 20.5),
@@ -74,7 +68,6 @@ PROFILE_DIMENSIONS: Dict[str, Tuple[float, float, float, float]] = {
     "HEB500": (500, 300, 14.5, 28.0), "HEB550": (550, 300, 15.0, 29.0), "HEB600": (600, 300, 15.5, 30.0),
     "HEB650": (650, 300, 16.0, 31.0), "HEB700": (700, 300, 17.0, 32.0),
     "HEB800": (800, 300, 17.5, 33.0), "HEB900": (900, 300, 18.5, 35.0), "HEB1000": (1000, 300, 19.0, 36.0),
-    # HEM
     "HEM220": (240, 226, 15.5, 32.5), "HEM240": (270, 248, 18.0, 32.0),
     "HEM260": (290, 268, 18.0, 32.5), "HEM280": (310, 288, 18.5, 33.0),
     "HEM300": (340, 310, 21.0, 39.0), "HEM320": (359, 309, 21.0, 40.0),
@@ -82,7 +75,6 @@ PROFILE_DIMENSIONS: Dict[str, Tuple[float, float, float, float]] = {
     "HEM400": (432, 307, 21.0, 40.0), "HEM450": (478, 307, 21.0, 40.0),
     "HEM500": (524, 306, 21.0, 40.0), "HEM550": (572, 306, 21.0, 40.0), "HEM600": (620, 305, 21.0, 40.0),
 }
-
 
 @dataclass(frozen=True)
 class ProfileGroupKey:
@@ -157,7 +149,6 @@ def get_allowed_lengths(profile: str) -> List[float]:
     return [6000.0, 12000.0]
 
 def is_splicing_allowed(profile_str: str) -> bool:
-    """TWARDA REGUŁA: Stykowanie dotyczy wyłącznie HEA, HEB, IPE, HEM > 200"""
     prof = str(profile_str).upper().replace(" ", "")
     m = re.match(r"^(HEA|HEB|HEM|IPE)(\d+)([ABM])?$", prof)
     if m:
@@ -166,17 +157,13 @@ def is_splicing_allowed(profile_str: str) -> bool:
     return False
 
 def get_profile_dimensions_fallback(profile_str: str) -> Tuple[float, float, float, float]:
-    """Zwraca parametry (h, b, tw, tf) profilu. Chroni przed brakującymi kluczami."""
     prof = str(profile_str).upper().replace(" ", "")
     if prof in PROFILE_DIMENSIONS:
         return PROFILE_DIMENSIONS[prof]
-    
-    # Aprobata fallback dla rzadkich/niestandardowych wymiarów z rodziny HE/IPE
     m = re.match(r"^(HEA|HEB|HEM|IPE)(\d+)", prof)
     if m:
         typ = m.group(1)
         size = int(m.group(2))
-        # Skrajne przybliżenie geometryczne by nie wywalić błędu (tylko na wypadek nietypowych gabarytów)
         if typ == "IPE":
             return (size, size/2.0, 5.0 + size/100.0, 8.0 + size/100.0)
         else:
@@ -184,14 +171,12 @@ def get_profile_dimensions_fallback(profile_str: str) -> Tuple[float, float, flo
     return (200.0, 200.0, 10.0, 10.0)
 
 def calculate_splice_cost(profile_str: str) -> float:
-    """Oblicza koszt 1 styku w PLN według logiki biznesowej dla kwalifikowanych profili."""
     if not is_splicing_allowed(profile_str):
         return 0.0
 
     h, b, tw, tf = get_profile_dimensions_fallback(profile_str)
-    
-    lw = 2.0 * (h / 1000.0)  # mb
-    lf = 2.0 * (b / 1000.0)  # mb
+    lw = 2.0 * (h / 1000.0)
+    lf = 2.0 * (b / 1000.0)
     L_styku = lw + lf
     L_ut = (h + 2.0 * b) / 1000.0
     
@@ -219,8 +204,8 @@ def calculate_splice_cost(profile_str: str) -> float:
     t_suma_min = t_ciecie + t_skladanie + t_spaw_w + t_spaw_f
     t_rbh = t_suma_min / 60.0
     
-    K_rob = t_rbh * 130.0  # PLN robocizna
-    K_ut = L_ut * 70.0     # PLN NDT
+    K_rob = t_rbh * 130.0
+    K_ut = L_ut * 70.0
     
     return K_rob + K_ut
 
@@ -310,11 +295,9 @@ def optimize_1d_single_group(
     splice_count = 0
 
     if enable_splicing:
-        # Pamiętamy fizyczną liczbę złączonych elementów, co daje (Liczba elementów - 1) styków.
         total_items = sum(it.quantity for it in items)
         splice_count = max(0, total_items - 1)
         
-        # Scalenie wszystkich detali
         total_length = 0.0
         combined_marks = []
         for it in items:
@@ -346,7 +329,6 @@ def optimize_1d_single_group(
                              remaining_cut_len -= take_len
                              part_num += 1
                              space_found = True
-                             # Redukujemy liczbę sztucznych styków jeśli długość przekroczyła dostępną sztangę i musieliśmy ją fizycznie podzielić
                              splice_count = max(0, splice_count - 1) 
                              break
                     
@@ -367,7 +349,7 @@ def optimize_1d_single_group(
                         stock_bars.append(new_bar)
                         remaining_cut_len -= take_len
                         part_num += 1
-                        if part_num > 2: # Każdy podział to fizyczne rozdzielenie, a więc mniej styków (brak łączenia miedzy sztangami)
+                        if part_num > 2:
                              splice_count = max(0, splice_count - 1)
                 continue
 
@@ -406,7 +388,6 @@ def optimize_1d_single_group(
                 stock_bars.append(new_bar)
                 
     else:
-        # OPCJA BEZ STYKU: Inteligentne dzielenie elementów dłuższych niż najdłuższa sztanga (np. 15.1m)
         for it in items:
             for _ in range(it.quantity):
                 expanded_cuts.append((it.mark, float(it.length)))
@@ -629,7 +610,16 @@ def parse_bom_file(uploaded_file) -> pd.DataFrame:
 
     for engine in ['openpyxl', 'xlrd', None]:
         try:
-            return pd.read_excel(io.BytesIO(raw_bytes), engine=engine) if engine else pd.read_excel(io.BytesIO(raw_bytes))
+            df_temp = pd.read_excel(io.BytesIO(raw_bytes), header=None, engine=engine) if engine else pd.read_excel(io.BytesIO(raw_bytes), header=None)
+            # Znajdź wiersz nagłówkowy w arkuszu SAP
+            h_idx = 0
+            for idx, r in df_temp.iterrows():
+                row_str = " ".join([str(v).lower() for v in r if v is not None])
+                if "profil" in row_str or "position" in row_str or "długość" in row_str or "length" in row_str:
+                    h_idx = idx
+                    break
+            df_temp.columns = [str(c).strip() for c in df_temp.iloc[h_idx]]
+            return df_temp.iloc[h_idx + 1:].reset_index(drop=True).dropna(how='all')
         except Exception:
             continue
 
@@ -953,7 +943,6 @@ if df_raw is not None and not df_raw.empty:
             }
             return bars, order_list, waste_dict, oversized_elements, splice_count
 
-        # Opcja 1 (Zawsze Bez Styku)
         b1, o1, w1, over_opt1, _ = calc_1d_scenario(False, bar_id_1)
         bars_opt1.extend(b1)
         bars_by_group_opt1[group_key] = b1
@@ -962,8 +951,6 @@ if df_raw is not None and not df_raw.empty:
         global_oversized_opt1.update(over_opt1)
         bar_id_1 += len(b1)
 
-        # Opcja 2 (Rozkrój inteligentny ze stykiem wg reguł Gatekeepera)
-        # Bramka weryfikacyjna - decyduje czy w tej grupie profili wariant B zastosuje stykowanie
         do_splice = is_splicing_allowed(group_key.profile)
         
         b2, o2, w2, _, sp_count2 = calc_1d_scenario(do_splice, bar_id_2)
@@ -1044,20 +1031,16 @@ if df_raw is not None and not df_raw.empty:
         if global_oversized_opt1:
             st.warning(f"⚠️ **Wymagana Akceptacja Technologiczna (dla Opcji 1):** Następujące pozycje przekraczały maksymalne długości handlowe (np. 15.1m lub 12.0m) i zostały automatycznie podzielone na krótsze odcinki, aby zmieścić się w bazowych sztangach: **{', '.join(global_oversized_opt1)}**. Prosimy o potwierdzenie proponowanego podziału u Klienta.")
         
-        # Koszt materiału Opcja 1 (Brutto, wlicza ukryty koszt odpadu w postaci zakupionych końcówek)
         order_opt1 = order_items_1d_opt1 + order_items_2d
         df_order_opt1 = pd.DataFrame(order_opt1)
         mass_opt1 = df_order_opt1["Masa Łączna [kg]"].sum() if not df_order_opt1.empty else 0
         material_cost_opt1 = (sum(r["Masa Łączna [kg]"] for r in order_items_1d_opt1) * price_profile_per_kg) + (sum(r["Masa Łączna [kg]"] for r in order_items_2d) * price_plate_per_kg)
-        cost_opt1 = material_cost_opt1 # Brak kosztów złącz
+        cost_opt1 = material_cost_opt1
 
-        # Koszt materiału Opcja 2 (Również masa Brutto pełnych zakupionych sztang)
         order_opt2 = order_items_1d_opt2 + order_items_2d
         df_order_opt2 = pd.DataFrame(order_opt2)
         mass_opt2 = df_order_opt2["Masa Łączna [kg]"].sum() if not df_order_opt2.empty else 0
         material_cost_opt2 = (sum(r["Masa Łączna [kg]"] for r in order_items_1d_opt2) * price_profile_per_kg) + (sum(r["Masa Łączna [kg]"] for r in order_items_2d) * price_plate_per_kg)
-        
-        # Ostateczny koszt Opcji 2 = Koszt zamówionego materiału (z fizycznym odpadem) + Koszty operacyjne styków
         cost_opt2 = material_cost_opt2 + total_splice_cost_opt2
 
         if not df_order_opt1.empty:
@@ -1090,7 +1073,6 @@ if df_raw is not None and not df_raw.empty:
             )
             st.text_area("Skopiuj poniższy tekst i wyślij do dystrybutora wraz z plikiem Excel:", value=email_body, height=220)
 
-            # Tabele warsztatowe
             workshop_1d_opt1_rows = [{"Nr Sztangi": b.bar_id, "Profil": b.profile, "Gatunek": b.grade, "Długość Handlowa [mm]": b.stock_length, "Rozkrój": " + ".join([f"{mark} ({l:.0f}mm)" for mark, l in b.cuts]), "Odpad [mm]": round(b.scrap_length, 1)} for b in bars_opt1]
             workshop_1d_opt2_rows = [{"Nr Sztangi": b.bar_id, "Profil": b.profile, "Gatunek": b.grade, "Długość Handlowa [mm]": b.stock_length, "Rozkrój": " + ".join([f"{mark} ({l:.0f}mm)" for mark, l in b.cuts]), "Odpad [mm]": round(b.scrap_length, 1)} for b in bars_opt2]
             workshop_2d_rows = [{"Nr Arkusza": p.plate_id, "Grubość [mm]": p.thickness, "Gatunek": p.grade, "Format": f"{p.stock_w:.0f}×{p.stock_l:.0f}", "Detale": ", ".join([f"{it.mark} ({it.w:.0f}×{it.h:.0f})" for it in p.packed_items])} for p in plates_result_all]
@@ -1159,5 +1141,3 @@ if df_raw is not None and not df_raw.empty:
         st.dataframe(df_clean, use_container_width=True)
 else:
     st.info("👈 Wgraj plik z zestawieniem materiałowym (BOM) lub kliknij **'🚀 Załaduj Testowy BOM'**, aby uruchomić podwójną optymalizację (Opcja 1 i Opcja 2).")
-
-
