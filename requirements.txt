@@ -1,5 +1,6 @@
 streamlit
-     pandas
-     numpy
-     matplotlib
-     openpyxl
+pandas
+numpy
+matplotlib
+openpyxl
+xlrd
