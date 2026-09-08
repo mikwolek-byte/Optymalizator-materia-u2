@@ -598,7 +598,7 @@ def parse_bom_file(uploaded_file) -> pd.DataFrame:
             header_idx = None
             for idx, r in raw_df.iterrows():
                 row_str = " ".join([str(v).lower() for v in r if v is not None])
-                if "profil" in row_str and any(k in row_str for k in ['długość', 'length', 'materiał', 'pozycja']):
+                if "profil" in row_str or "profile" in row_str:
                     header_idx = idx
                     break
             if header_idx is not None:
@@ -614,7 +614,7 @@ def parse_bom_file(uploaded_file) -> pd.DataFrame:
             h_idx = 0
             for idx, r in df_temp.iterrows():
                 row_str = " ".join([str(v).lower() for v in r if v is not None])
-                if "profil" in row_str or "position" in row_str or "długość" in row_str or "length" in row_str or "länge" in row_str:
+                if "profil" in row_str or "profile" in row_str or "position" in row_str or "długość" in row_str or "length" in row_str or "länge" in row_str:
                     h_idx = idx
                     break
             df_temp.columns = [str(c).strip() for c in df_temp.iloc[h_idx]]
@@ -651,17 +651,29 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
             col_map[col] = 'thick'
 
     df_ren = df.rename(columns=col_map)
-    clean_rows = []
     
+    # Bezpieczne sprawdzenie czy wymagane kolumny zostały zmapowane
+    if 'profile' not in df_ren.columns:
+        # Fallback: spróbuj znaleźć pierwszą kolumnę zawierającą teksty profili
+        for c in df_ren.columns:
+            sample_vals = df_ren[c].astype(str).head(5).str.upper()
+            if any(any(p in val for p in ['IPE', 'HEA', 'HEB', 'HEM', 'BL', 'PL']) for val in sample_vals):
+                df_ren = df_ren.rename(columns={c: 'profile'})
+                break
+
+    if 'profile' not in df_ren.columns:
+        raise KeyError("Nie znaleziono kolumny 'profile' w pliku BOM. Sprawdź format pliku.")
+
+    clean_rows = []
     for _, row in df_ren.iterrows():
-        mark_val = str(row.get('mark', '')).strip()
+        mark_val = str(row.get('mark', f"P{len(clean_rows)+1}")).strip()
         prof_val = str(row.get('profile', '')).strip()
-        len_val = str(row.get('length', '')).strip()
+        len_val = str(row.get('length', '0')).strip()
         qty_val = str(row.get('qty', '1')).strip()
 
         if any(w in mark_val.lower() for w in ['suma', 'total', 'summe']) or any(w in len_val.lower() for w in ['suma', 'total', 'summe']):
             continue
-        if prof_val in ['', 'None', 'nan'] or mark_val in ['', 'None', 'nan']:
+        if prof_val in ['', 'None', 'nan', 'nat']:
             continue
 
         try:
@@ -688,7 +700,7 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
 
             if q > 0 and valid:
                 clean_rows.append({
-                    "mark": mark_val,
+                    "mark": mark_val if mark_val not in ['', 'None', 'nan'] else f"P{len(clean_rows)+1}",
                     "profile": prof_val,
                     "grade": grd,
                     "length": l,
@@ -861,286 +873,293 @@ if uploaded_file is not None:
 df_raw = st.session_state.get("bom_data")
 
 if df_raw is not None and not df_raw.empty:
-    df_clean = map_imported_columns(df_raw)
+    try:
+        df_clean = map_imported_columns(df_raw)
+    except Exception as map_err:
+        st.error(f"Błąd mapowania kolumn BOM: {map_err}")
+        df_clean = pd.DataFrame()
 
-    is_structural_1d = df_clean["profile"].str.contains(
-        r"IPE|HEA|HEB|HEM|UNP|UPE|RHS|SHS|CHS|RO|ROHR|RK|RP|^(?:L|KAT|KĄT|D|FI)", case=False, regex=True
-    )
-    is_plate_condition = (
-        df_clean["profile"].str.contains(r"PL|BLACHA|PLATE|PŁYT|FORMATKA|#", case=False, regex=True)
-        | ((df_clean["width"] > 0) & (df_clean["thick"] > 0) & (~is_structural_1d))
-    )
+    if not df_clean.empty and "profile" in df_clean.columns:
+        is_structural_1d = df_clean["profile"].str.contains(
+            r"IPE|HEA|HEB|HEM|UNP|UPE|RHS|SHS|CHS|RO|ROHR|RK|RP|^(?:L|KAT|KĄT|D|FI)", case=False, regex=True
+        )
+        is_plate_condition = (
+            df_clean["profile"].str.contains(r"PL|BLACHA|PLATE|PŁYT|FORMATKA|#", case=False, regex=True)
+            | ((df_clean["width"] > 0) & (df_clean["thick"] > 0) & (~is_structural_1d))
+        )
 
-    df_1d = df_clean[~is_plate_condition].copy()
-    df_2d = df_clean[is_plate_condition].copy()
+        df_1d = df_clean[~is_plate_condition].copy()
+        df_2d = df_clean[is_plate_condition].copy()
 
-    raw_items_1d = [
-        Item1D(mark=str(r["mark"]), length=float(r["length"]), profile=str(r["profile"]), grade=str(r["grade"]), quantity=int(r["qty"]))
-        for _, r in df_1d.iterrows() if r["length"] > 0
-    ]
-    raw_items_2d = [
-        PlateItem(mark=str(r["mark"]), grade=str(r["grade"]), thickness=float(r["thick"]) if float(r["thick"]) > 0 else 10.0, width=float(r["width"]) if float(r["width"]) > 0 else 200.0, length=float(r["length"]), quantity=int(r["qty"]))
-        for _, r in df_2d.iterrows() if r["length"] > 0 and r["width"] > 0
-    ]
+        raw_items_1d = [
+            Item1D(mark=str(r["mark"]), length=float(r["length"]), profile=str(r["profile"]), grade=str(r["grade"]), quantity=int(r["qty"]))
+            for _, r in df_1d.iterrows() if r["length"] > 0
+        ]
+        raw_items_2d = [
+            PlateItem(mark=str(r["mark"]), grade=str(r["grade"]), thickness=float(r["thick"]) if float(r["thick"]) > 0 else 10.0, width=float(r["width"]) if float(r["width"]) > 0 else 200.0, length=float(r["length"]), quantity=int(r["qty"]))
+            for _, r in df_2d.iterrows() if r["length"] > 0 and r["width"] > 0
+        ]
 
-    grouped_1d_dict = group_1d_items_by_material(raw_items_1d)
-    grouped_2d_dict = group_2d_plates_by_material(raw_items_2d)
+        grouped_1d_dict = group_1d_items_by_material(raw_items_1d)
+        grouped_2d_dict = group_2d_plates_by_material(raw_items_2d)
 
-    bars_opt1, bars_opt2 = [], []
-    bars_by_group_opt1, bars_by_group_opt2 = {}, {}
-    order_items_1d_opt1, order_items_1d_opt2 = [], []
-    profile_waste_1d_opt1, profile_waste_1d_opt2 = [], []
-    global_oversized_opt1 = set()
+        bars_opt1, bars_opt2 = [], []
+        bars_by_group_opt1, bars_by_group_opt2 = {}, {}
+        order_items_1d_opt1, order_items_1d_opt2 = [], []
+        profile_waste_1d_opt1, profile_waste_1d_opt2 = [], []
+        global_oversized_opt1 = set()
 
-    bar_id_1, bar_id_2 = 1, 1
-    total_splice_count_opt2 = 0
-    total_splice_cost_opt2 = 0.0
+        bar_id_1, bar_id_2 = 1, 1
+        total_splice_count_opt2 = 0
+        total_splice_cost_opt2 = 0.0
 
-    for group_key, group_items in grouped_1d_dict.items():
-        allowed_stocks = get_allowed_lengths(group_key.profile)
-        unit_wt = get_unit_weight_1d(group_key.profile)
-        sub_netto_len = sum(it.length * it.quantity for it in group_items)
-        sub_netto_mass = (sub_netto_len / 1000.0) * unit_wt
+        for group_key, group_items in grouped_1d_dict.items():
+            allowed_stocks = get_allowed_lengths(group_key.profile)
+            unit_wt = get_unit_weight_1d(group_key.profile)
+            sub_netto_len = sum(it.length * it.quantity for it in group_items)
+            sub_netto_mass = (sub_netto_len / 1000.0) * unit_wt
 
-        def calc_1d_scenario(enable_splice, bar_id_start):
-            bars, oversized_elements, splice_count = optimize_1d_single_group(
-                group_key, group_items, allowed_stocks, kerf=kerf_1d, trim_cut=trim_1d, 
-                start_bar_id=bar_id_start, enable_splicing=enable_splice
-            )
-            stock_counts: Dict[float, int] = {}
-            sub_purchased_len = 0.0
-            for b in bars:
-                stock_counts[b.stock_length] = stock_counts.get(b.stock_length, 0) + 1
-                sub_purchased_len += b.stock_length
+            def calc_1d_scenario(enable_splice, bar_id_start):
+                bars, oversized_elements, splice_count = optimize_1d_single_group(
+                    group_key, group_items, allowed_stocks, kerf=kerf_1d, trim_cut=trim_1d, 
+                    start_bar_id=bar_id_start, enable_splicing=enable_splice
+                )
+                stock_counts: Dict[float, int] = {}
+                sub_purchased_len = 0.0
+                for b in bars:
+                    stock_counts[b.stock_length] = stock_counts.get(b.stock_length, 0) + 1
+                    sub_purchased_len += b.stock_length
 
-            order_list = []
-            for length_mm, qty_bars in stock_counts.items():
-                tot_mass = (length_mm / 1000.0) * unit_wt * qty_bars
-                order_list.append({
-                    "Kategoria": "Profil hutniczy (1D)",
-                    "Asortyment": group_key.profile,
+                order_list = []
+                for length_mm, qty_bars in stock_counts.items():
+                    tot_mass = (length_mm / 1000.0) * unit_wt * qty_bars
+                    order_list.append({
+                        "Kategoria": "Profil hutniczy (1D)",
+                        "Asortyment": group_key.profile,
+                        "Gatunek Stali": group_key.grade,
+                        "Wymiar Handlowy": f"L = {length_mm:.0f} mm",
+                        "Ilość Zamawiana [szt.]": qty_bars,
+                        "Masa Jednostkowa [kg]": round((length_mm / 1000.0) * unit_wt, 1),
+                        "Masa Łączna [kg]": round(tot_mass, 1),
+                        "Wymagany Atest": "3.1 wg PN-EN 10204",
+                    })
+
+                sub_purchased_mass = (sub_purchased_len / 1000.0) * unit_wt
+                sub_scrap_mass_kg = max(0.0, sub_purchased_mass - sub_netto_mass)
+                sub_scrap_pct = ((sub_purchased_mass - sub_netto_mass) / sub_purchased_mass * 100.0) if sub_purchased_mass > 0 else 0.0
+
+                waste_dict = {
+                    "Profil": group_key.profile,
+                    "Gatunek": group_key.grade,
+                    "Masa 1mb [kg]": round(unit_wt, 2),
+                    "Liczba sztang [szt.]": len(bars),
+                    "Długość netto [m]": round(sub_netto_len / 1000.0, 2),
+                    "Długość brutto [m]": round(sub_purchased_len / 1000.0, 2),
+                    "Masa netto [kg]": round(sub_netto_mass, 1),
+                    "Masa brutto [kg]": round(sub_purchased_mass, 1),
+                    "Odpad [kg]": round(sub_scrap_mass_kg, 1),
+                    "Odpad [%]": round(sub_scrap_pct, 2),
+                    "Wykonane Styki [szt.]": splice_count
+                }
+                return bars, order_list, waste_dict, oversized_elements, splice_count
+
+            b1, o1, w1, over_opt1, _ = calc_1d_scenario(False, bar_id_1)
+            bars_opt1.extend(b1)
+            bars_by_group_opt1[group_key] = b1
+            order_items_1d_opt1.extend(o1)
+            profile_waste_1d_opt1.append(w1)
+            global_oversized_opt1.update(over_opt1)
+            bar_id_1 += len(b1)
+
+            do_splice = is_splicing_allowed(group_key.profile)
+            
+            b2, o2, w2, _, sp_count2 = calc_1d_scenario(do_splice, bar_id_2)
+            bars_opt2.extend(b2)
+            bars_by_group_opt2[group_key] = b2
+            order_items_1d_opt2.extend(o2)
+            profile_waste_1d_opt2.append(w2)
+            bar_id_2 += len(b2)
+            
+            if do_splice and sp_count2 > 0:
+                total_splice_count_opt2 += sp_count2
+                unit_splice_cost = calculate_splice_cost(group_key.profile)
+                total_splice_cost_opt2 += sp_count2 * unit_splice_cost
+
+        plates_result_all: List[StockPlate] = []
+        order_items_2d: List[Dict] = []
+        plate_waste_summary_2d: List[Dict] = []
+        plate_id_counter = 1
+
+        for group_key, group_items in grouped_2d_dict.items():
+            plates = optimize_2d_single_group(group_key, group_items, available_plate_formats, kerf_spacing=kerf_2d, edge_margin=margin_2d, start_plate_id=plate_id_counter)
+            plate_id_counter += len(plates)
+            plates_result_all.extend(plates)
+
+            format_aggregation: Dict[Tuple[float, float, str], int] = {}
+            for pl in plates:
+                fmt_key = (pl.stock_w, pl.stock_l, pl.format_name or f"{pl.stock_w:.0f} × {pl.stock_l:.0f} mm")
+                format_aggregation[fmt_key] = format_aggregation.get(fmt_key, 0) + 1
+
+            sub_gross_area_m2 = sum((pl.stock_w * pl.stock_l) / 1_000_000.0 for pl in plates)
+            sub_net_area_m2 = sum((it.width * it.length * it.quantity) for it in group_items) / 1_000_000.0
+
+            for (f_w, f_l, f_name), count_sheets in format_aggregation.items():
+                single_sheet_area = (f_w * f_l) / 1_000_000.0
+                single_mass_kg = single_sheet_area * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
+                tot_format_mass_kg = count_sheets * single_mass_kg
+                order_items_2d.append({
+                    "Kategoria": "Blacha gruba (2D)",
+                    "Asortyment": f"Blacha #{group_key.thickness:.0f} mm",
                     "Gatunek Stali": group_key.grade,
-                    "Wymiar Handlowy": f"L = {length_mm:.0f} mm",
-                    "Ilość Zamawiana [szt.]": qty_bars,
-                    "Masa Jednostkowa [kg]": round((length_mm / 1000.0) * unit_wt, 1),
-                    "Masa Łączna [kg]": round(tot_mass, 1),
+                    "Wymiar Handlowy": f"{f_w:.0f} × {f_l:.0f} mm",
+                    "Ilość Zamawiana [szt.]": count_sheets,
+                    "Masa Jednostkowa [kg]": round(single_mass_kg, 1),
+                    "Masa Łączna [kg]": round(tot_format_mass_kg, 1),
                     "Wymagany Atest": "3.1 wg PN-EN 10204",
                 })
 
-            sub_purchased_mass = (sub_purchased_len / 1000.0) * unit_wt
-            sub_scrap_mass_kg = max(0.0, sub_purchased_mass - sub_netto_mass)
-            sub_scrap_pct = ((sub_purchased_mass - sub_netto_mass) / sub_purchased_mass * 100.0) if sub_purchased_mass > 0 else 0.0
+            sub_gross_mass_kg = sub_gross_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
+            sub_net_mass_kg = sub_net_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
+            sub_waste_mass_kg = max(0.0, sub_gross_mass_kg - sub_net_mass_kg)
+            sub_waste_pct = ((sub_gross_area_m2 - sub_net_area_m2) / sub_gross_area_m2 * 100.0) if sub_gross_area_m2 > 0 else 0.0
+            format_summary_str = ", ".join([f"{cnt}× ({f_w:.0f}×{f_l:.0f})" for (f_w, f_l, _), cnt in format_aggregation.items()])
 
-            waste_dict = {
-                "Profil": group_key.profile,
+            plate_waste_summary_2d.append({
+                "Grubość [mm]": group_key.thickness,
                 "Gatunek": group_key.grade,
-                "Masa 1mb [kg]": round(unit_wt, 2),
-                "Liczba sztang [szt.]": len(bars),
-                "Długość netto [m]": round(sub_netto_len / 1000.0, 2),
-                "Długość brutto [m]": round(sub_purchased_len / 1000.0, 2),
-                "Masa netto [kg]": round(sub_netto_mass, 1),
-                "Masa brutto [kg]": round(sub_purchased_mass, 1),
-                "Odpad [kg]": round(sub_scrap_mass_kg, 1),
-                "Odpad [%]": round(sub_scrap_pct, 2),
-                "Wykonane Styki [szt.]": splice_count
-            }
-            return bars, order_list, waste_dict, oversized_elements, splice_count
-
-        b1, o1, w1, over_opt1, _ = calc_1d_scenario(False, bar_id_1)
-        bars_opt1.extend(b1)
-        bars_by_group_opt1[group_key] = b1
-        order_items_1d_opt1.extend(o1)
-        profile_waste_1d_opt1.append(w1)
-        global_oversized_opt1.update(over_opt1)
-        bar_id_1 += len(b1)
-
-        do_splice = is_splicing_allowed(group_key.profile)
-        
-        b2, o2, w2, _, sp_count2 = calc_1d_scenario(do_splice, bar_id_2)
-        bars_opt2.extend(b2)
-        bars_by_group_opt2[group_key] = b2
-        order_items_1d_opt2.extend(o2)
-        profile_waste_1d_opt2.append(w2)
-        bar_id_2 += len(b2)
-        
-        if do_splice and sp_count2 > 0:
-            total_splice_count_opt2 += sp_count2
-            unit_splice_cost = calculate_splice_cost(group_key.profile)
-            total_splice_cost_opt2 += sp_count2 * unit_splice_cost
-
-    plates_result_all: List[StockPlate] = []
-    order_items_2d: List[Dict] = []
-    plate_waste_summary_2d: List[Dict] = []
-    plate_id_counter = 1
-
-    for group_key, group_items in grouped_2d_dict.items():
-        plates = optimize_2d_single_group(group_key, group_items, available_plate_formats, kerf_spacing=kerf_2d, edge_margin=margin_2d, start_plate_id=plate_id_counter)
-        plate_id_counter += len(plates)
-        plates_result_all.extend(plates)
-
-        format_aggregation: Dict[Tuple[float, float, str], int] = {}
-        for pl in plates:
-            fmt_key = (pl.stock_w, pl.stock_l, pl.format_name or f"{pl.stock_w:.0f} × {pl.stock_l:.0f} mm")
-            format_aggregation[fmt_key] = format_aggregation.get(fmt_key, 0) + 1
-
-        sub_gross_area_m2 = sum((pl.stock_w * pl.stock_l) / 1_000_000.0 for pl in plates)
-        sub_net_area_m2 = sum((it.width * it.length * it.quantity) for it in group_items) / 1_000_000.0
-
-        for (f_w, f_l, f_name), count_sheets in format_aggregation.items():
-            single_sheet_area = (f_w * f_l) / 1_000_000.0
-            single_mass_kg = single_sheet_area * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
-            tot_format_mass_kg = count_sheets * single_mass_kg
-            order_items_2d.append({
-                "Kategoria": "Blacha gruba (2D)",
-                "Asortyment": f"Blacha #{group_key.thickness:.0f} mm",
-                "Gatunek Stali": group_key.grade,
-                "Wymiar Handlowy": f"{f_w:.0f} × {f_l:.0f} mm",
-                "Ilość Zamawiana [szt.]": count_sheets,
-                "Masa Jednostkowa [kg]": round(single_mass_kg, 1),
-                "Masa Łączna [kg]": round(tot_format_mass_kg, 1),
-                "Wymagany Atest": "3.1 wg PN-EN 10204",
+                "Liczba arkuszy [szt.]": len(plates),
+                "Dobrane formaty": format_summary_str,
+                "Powierzchnia netto [m²]": round(sub_net_area_m2, 2),
+                "Powierzchnia brutto [m²]": round(sub_gross_area_m2, 2),
+                "Masa netto [kg]": round(sub_net_mass_kg, 1),
+                "Masa brutto [kg]": round(sub_gross_mass_kg, 1),
+                "Odpad [kg]": round(sub_waste_mass_kg, 1),
+                "Odpad [%]": round(sub_waste_pct, 2),
             })
 
-        sub_gross_mass_kg = sub_gross_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
-        sub_net_mass_kg = sub_net_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
-        sub_waste_mass_kg = max(0.0, sub_gross_mass_kg - sub_net_mass_kg)
-        sub_waste_pct = ((sub_gross_area_m2 - sub_net_area_m2) / sub_gross_area_m2 * 100.0) if sub_gross_area_m2 > 0 else 0.0
-        format_summary_str = ", ".join([f"{cnt}× ({f_w:.0f}×{f_l:.0f})" for (f_w, f_l, _), cnt in format_aggregation.items()])
+        tab_procure, tab_1d_opt1, tab_1d_opt2, tab_2d_view, tab_source = st.tabs([
+            "🛒 Wyniki i Opcje (RFQ)",
+            "📏 Rozkrój (Bez Styku)",
+            "📏 Rozkrój (Ze Stykiem)",
+            "📐 Nesting Blach (2D)",
+            "📋 Zaimportowany BOM",
+        ])
 
-        plate_waste_summary_2d.append({
-            "Grubość [mm]": group_key.thickness,
-            "Gatunek": group_key.grade,
-            "Liczba arkuszy [szt.]": len(plates),
-            "Dobrane formaty": format_summary_str,
-            "Powierzchnia netto [m²]": round(sub_net_area_m2, 2),
-            "Powierzchnia brutto [m²]": round(sub_gross_area_m2, 2),
-            "Masa netto [kg]": round(sub_net_mass_kg, 1),
-            "Masa brutto [kg]": round(sub_gross_mass_kg, 1),
-            "Odpad [kg]": round(sub_waste_mass_kg, 1),
-            "Odpad [%]": round(sub_waste_pct, 2),
-        })
-
-    tab_procure, tab_1d_opt1, tab_1d_opt2, tab_2d_view, tab_source = st.tabs([
-        "🛒 Wyniki i Opcje (RFQ)",
-        "📏 Rozkrój (Bez Styku)",
-        "📏 Rozkrój (Ze Stykiem)",
-        "📐 Nesting Blach (2D)",
-        "📋 Zaimportowany BOM",
-    ])
-
-    with tab_procure:
-        st.markdown("### 🛒 Zestawienie Opcji Zakupowych (Handlowe RFQ)")
-        
-        if global_oversized_opt1:
-            st.warning(f"⚠️ **Wymagana Akceptacja Technologiczna (dla Opcji 1):** Następujące pozycje przekraczały maksymalne długości handlowe (np. 15.1m lub 12.0m) i zostały automatycznie podzielone na krótsze odcinki, aby zmieścić się w bazowych sztangach: **{', '.join(global_oversized_opt1)}**. Prosimy o potwierdzenie proponowanego podziału u Klienta.")
-        
-        order_opt1 = order_items_1d_opt1 + order_items_2d
-        df_order_opt1 = pd.DataFrame(order_opt1)
-        mass_opt1 = df_order_opt1["Masa Łączna [kg]"].sum() if not df_order_opt1.empty else 0
-        material_cost_opt1 = (sum(r["Masa Łączna [kg]"] for r in order_items_1d_opt1) * price_profile_per_kg) + (sum(r["Masa Łączna [kg]"] for r in order_items_2d) * price_plate_per_kg)
-        cost_opt1 = material_cost_opt1
-
-        order_opt2 = order_items_1d_opt2 + order_items_2d
-        df_order_opt2 = pd.DataFrame(order_opt2)
-        mass_opt2 = df_order_opt2["Masa Łączna [kg]"].sum() if not df_order_opt2.empty else 0
-        material_cost_opt2 = (sum(r["Masa Łączna [kg]"] for r in order_items_1d_opt2) * price_profile_per_kg) + (sum(r["Masa Łączna [kg]"] for r in order_items_2d) * price_plate_per_kg)
-        cost_opt2 = material_cost_opt2 + total_splice_cost_opt2
-
-        if not df_order_opt1.empty:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.info(f"**Opcja 1 (Wariant A: Bez Styku)**\n\n"
-                        f"Masa brutto zamówienia: **{mass_opt1/1000.0:.2f} t**\n"
-                        f"Koszt materiału brutto: {material_cost_opt1:,.2f} PLN\n"
-                        f"---\n"
-                        f"**Szacowany koszt CAŁKOWITY: {cost_opt1:,.2f} PLN**")
-            with col2:
-                st.success(f"**Opcja 2 (Wariant B: Ze Stykiem)**\n\n"
-                           f"Masa brutto zamówienia: **{mass_opt2/1000.0:.2f} t**\n"
-                           f"Koszt materiału brutto: {material_cost_opt2:,.2f} PLN\n"
-                           f"Liczba wykonanych styków (zgodnych): {total_splice_count_opt2} szt.\n"
-                           f"Koszt wykonania styków (robocizna + UT): {total_splice_cost_opt2:,.2f} PLN\n"
-                           f"---\n"
-                           f"**Szacowany koszt CAŁKOWITY: {cost_opt2:,.2f} PLN**")
-
-            st.markdown("#### ✉️ Gotowa treść zapytania ofertowego (E-mail)")
-            email_body = (
-                "Dzień dobry,\n\n"
-                "Proszę o przygotowanie oferty cenowej oraz podanie dostępności dla wyrobów hutniczych, "
-                "zgodnie z załączonym plikiem Excel. Plik zawiera dwie alternatywne opcje zestawienia, proszę o wycenę wybranej przez Państwa w zależności od dostępności sztang.\n\n"
-                "Wymagania dodatkowe:\n"
-                "- Atest materiałowy 3.1 (PN-EN 10204) dla wszystkich zamawianych pozycji.\n"
-                "- Proszę o uwzględnienie kosztów transportu.\n\n"
-                "Z góry dziękuję za szybką odpowiedź.\n"
-                "Pozdrawiam,\n[Twój Podpis]"
-            )
-            st.text_area("Skopiuj poniższy tekst i wyślij do dystrybutora wraz z plikiem Excel:", value=email_body, height=220)
-
-            workshop_1d_opt1_rows = [{"Nr Sztangi": b.bar_id, "Profil": b.profile, "Gatunek": b.grade, "Długość Handlowa [mm]": b.stock_length, "Rozkrój": " + ".join([f"{mark} ({l:.0f}mm)" for mark, l in b.cuts]), "Odpad [mm]": round(b.scrap_length, 1)} for b in bars_opt1]
-            workshop_1d_opt2_rows = [{"Nr Sztangi": b.bar_id, "Profil": b.profile, "Gatunek": b.grade, "Długość Handlowa [mm]": b.stock_length, "Rozkrój": " + ".join([f"{mark} ({l:.0f}mm)" for mark, l in b.cuts]), "Odpad [mm]": round(b.scrap_length, 1)} for b in bars_opt2]
-            workshop_2d_rows = [{"Nr Arkusza": p.plate_id, "Grubość [mm]": p.thickness, "Gatunek": p.grade, "Format": f"{p.stock_w:.0f}×{p.stock_l:.0f}", "Detale": ", ".join([f"{it.mark} ({it.w:.0f}×{it.h:.0f})" for it in p.packed_items])} for p in plates_result_all]
-
-            excel_buffer = build_excel_export(
-                order_opt1=df_order_opt1,
-                order_opt2=df_order_opt2,
-                cut_1d_opt1=pd.DataFrame(workshop_1d_opt1_rows),
-                cut_1d_opt2=pd.DataFrame(workshop_1d_opt2_rows),
-                cut_2d=pd.DataFrame(workshop_2d_rows),
-                stats_1d_opt1=pd.DataFrame(profile_waste_1d_opt1),
-                stats_1d_opt2=pd.DataFrame(profile_waste_1d_opt2),
-                stats_2d=pd.DataFrame(plate_waste_summary_2d)
-            )
-
-            st.download_button(
-                label="📥 Pobierz Kompletny Raport (Opcja 1 i 2) [Excel .xlsx]",
-                data=excel_buffer,
-                file_name="Zamowienie_Hutnicze_SteelOpt_V2.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-        else:
-            st.info("Brak pozycji do zamówienia.")
-
-    with tab_1d_opt1:
-        st.markdown("### 📏 Rozkrój Profili - Opcja 1 (Bez Styku)")
-        if not bars_opt1:
-            st.info("Brak profili 1D.")
-        else:
-            group_options = ["Wszystkie grupy"] + [f"{k.profile} | {k.grade}" for k in bars_by_group_opt1.keys()]
-            selected_grp_str = st.selectbox("Wybierz grupę:", group_options, key="grp_opt1")
-            bars_filtered = bars_opt1 if selected_grp_str == "Wszystkie grupy" else bars_by_group_opt1[next(k for k in bars_by_group_opt1.keys() if f"{k.profile} | {k.grade}" == selected_grp_str)]
+        with tab_procure:
+            st.markdown("### 🛒 Zestawienie Opcji Zakupowych (Handlowe RFQ)")
             
-            fig_1d = plot_1d_cutting_plan(bars_filtered[:25], title_suffix=f"Opcja 1: {selected_grp_str}")
-            st.pyplot(fig_1d)
-            plt.close(fig_1d)
-
-    with tab_1d_opt2:
-        st.markdown("### 📏 Rozkrój Profili - Opcja 2 (Ze Stykiem)")
-        if not bars_opt2:
-            st.info("Brak profili 1D.")
-        else:
-            group_options2 = ["Wszystkie grupy"] + [f"{k.profile} | {k.grade}" for k in bars_by_group_opt2.keys()]
-            selected_grp_str2 = st.selectbox("Wybierz grupę:", group_options2, key="grp_opt2")
-            bars_filtered2 = bars_opt2 if selected_grp_str2 == "Wszystkie grupy" else bars_by_group_opt2[next(k for k in bars_by_group_opt2.keys() if f"{k.profile} | {k.grade}" == selected_grp_str2)]
+            if global_oversized_opt1:
+                st.warning(f"⚠️ **Wymagana Akceptacja Technologiczna (dla Opcji 1):** Następujące pozycje przekraczały maksymalne długości handlowe (np. 15.1m lub 12.0m) i zostały automatycznie podzielone na krótsze odcinki, aby zmieścić się w bazowych sztangach: **{', '.join(global_oversized_opt1)}**. Prosimy o potwierdzenie proponowanego podziału u Klienta.")
             
-            fig_1d2 = plot_1d_cutting_plan(bars_filtered2[:25], title_suffix=f"Opcja 2: {selected_grp_str2}")
-            st.pyplot(fig_1d2)
-            plt.close(fig_1d2)
+            order_opt1 = order_items_1d_opt1 + order_items_2d
+            df_order_opt1 = pd.DataFrame(order_opt1)
+            mass_opt1 = df_order_opt1["Masa Łączna [kg]"].sum() if not df_order_opt1.empty else 0
+            material_cost_opt1 = (sum(r["Masa Łączna [kg]"] for r in order_items_1d_opt1) * price_profile_per_kg) + (sum(r["Masa Łączna [kg]"] for r in order_items_2d) * price_plate_per_kg)
+            cost_opt1 = material_cost_opt1
 
-    with tab_2d_view:
-        st.markdown("### 📐 Wizualna Prezentacja Rozkroju Arkuszy Blach (2D Nesting)")
-        if not plates_result_all:
-            st.info("Brak formatek blach.")
-        else:
-            plate_choices = [f"Arkusz #{p.plate_id} - #{p.thickness:.0f}mm {p.grade} ({p.stock_w:.0f}×{p.stock_l:.0f})" for p in plates_result_all]
-            selected_p_idx = st.selectbox("Wybierz arkusz do podglądu:", range(len(plates_result_all)), format_func=lambda i: plate_choices[i])
-            fig_single = plot_2d_plate_plan(plates_result_all[selected_p_idx])
-            st.pyplot(fig_single)
-            plt.close(fig_single)
+            order_opt2 = order_items_1d_opt2 + order_items_2d
+            df_order_opt2 = pd.DataFrame(order_opt2)
+            mass_opt2 = df_order_opt2["Masa Łączna [kg]"].sum() if not df_order_opt2.empty else 0
+            material_cost_opt2 = (sum(r["Masa Łączna [kg]"] for r in order_items_1d_opt2) * price_profile_per_kg) + (sum(r["Masa Łączna [kg]"] for r in order_items_2d) * price_plate_per_kg)
+            cost_opt2 = material_cost_opt2 + total_splice_cost_opt2
 
-    with tab_source:
-        st.markdown("### 📋 Zaimportowany BOM i Weryfikacja")
-        st.dataframe(df_clean, use_container_width=True)
+            if not df_order_opt1.empty:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.info(f"**Opcja 1 (Wariant A: Bez Styku)**\n\n"
+                            f"Masa brutto zamówienia: **{mass_opt1/1000.0:.2f} t**\n"
+                            f"Koszt materiału brutto: {material_cost_opt1:,.2f} PLN\n"
+                            f"---\n"
+                            f"**Szacowany koszt CAŁKOWITY: {cost_opt1:,.2f} PLN**")
+                with col2:
+                    st.success(f"**Opcja 2 (Wariant B: Ze Stykiem)**\n\n"
+                               f"Masa brutto zamówienia: **{mass_opt2/1000.0:.2f} t**\n"
+                               f"Koszt materiału brutto: {material_cost_opt2:,.2f} PLN\n"
+                               f"Liczba wykonanych styków (zgodnych): {total_splice_count_opt2} szt.\n"
+                               f"Koszt wykonania styków (robocizna + UT): {total_splice_cost_opt2:,.2f} PLN\n"
+                               f"---\n"
+                               f"**Szacowany koszt CAŁKOWITY: {cost_opt2:,.2f} PLN**")
+
+                st.markdown("#### ✉️ Gotowa treść zapytania ofertowego (E-mail)")
+                email_body = (
+                    "Dzień dobry,\n\n"
+                    "Proszę o przygotowanie oferty cenowej oraz podanie dostępności dla wyrobów hutniczych, "
+                    "zgodnie z załączonym plikiem Excel. Plik zawiera dwie alternatywne opcje zestawienia, proszę o wycenę wybranej przez Państwa w zależności od dostępności sztang.\n\n"
+                    "Wymagania dodatkowe:\n"
+                    "- Atest materiałowy 3.1 (PN-EN 10204) dla wszystkich zamawianych pozycji.\n"
+                    "- Proszę o uwzględnienie kosztów transportu.\n\n"
+                    "Z góry dziękuję za szybką odpowiedź.\n"
+                    "Pozdrawiam,\n[Twój Podpis]"
+                )
+                st.text_area("Skopiuj poniższy tekst i wyślij do dystrybutora wraz z plikiem Excel:", value=email_body, height=220)
+
+                workshop_1d_opt1_rows = [{"Nr Sztangi": b.bar_id, "Profil": b.profile, "Gatunek": b.grade, "Długość Handlowa [mm]": b.stock_length, "Rozkrój": " + ".join([f"{mark} ({l:.0f}mm)" for mark, l in b.cuts]), "Odpad [mm]": round(b.scrap_length, 1)} for b in bars_opt1]
+                workshop_1d_opt2_rows = [{"Nr Sztangi": b.bar_id, "Profil": b.profile, "Gatunek": b.grade, "Długość Handlowa [mm]": b.stock_length, "Rozkrój": " + ".join([f"{mark} ({l:.0f}mm)" for mark, l in b.cuts]), "Odpad [mm]": round(b.scrap_length, 1)} for b in bars_opt2]
+                workshop_2d_rows = [{"Nr Arkusza": p.plate_id, "Grubość [mm]": p.thickness, "Gatunek": p.grade, "Format": f"{p.stock_w:.0f}×{p.stock_l:.0f}", "Detale": ", ".join([f"{it.mark} ({it.w:.0f}×{it.h:.0f})" for it in p.packed_items])} for p in plates_result_all]
+
+                excel_buffer = build_excel_export(
+                    order_opt1=df_order_opt1,
+                    order_opt2=df_order_opt2,
+                    cut_1d_opt1=pd.DataFrame(workshop_1d_opt1_rows),
+                    cut_1d_opt2=pd.DataFrame(workshop_1d_opt2_rows),
+                    cut_2d=pd.DataFrame(workshop_2d_rows),
+                    stats_1d_opt1=pd.DataFrame(profile_waste_1d_opt1),
+                    stats_1d_opt2=pd.DataFrame(profile_waste_1d_opt2),
+                    stats_2d=pd.DataFrame(plate_waste_summary_2d)
+                )
+
+                st.download_button(
+                    label="📥 Pobierz Kompletny Raport (Opcja 1 i 2) [Excel .xlsx]",
+                    data=excel_buffer,
+                    file_name="Zamowienie_Hutnicze_SteelOpt_V2.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True
+                )
+            else:
+                st.info("Brak pozycji do zamówienia.")
+
+        with tab_1d_opt1:
+            st.markdown("### 📏 Rozkrój Profili - Opcja 1 (Bez Styku)")
+            if not bars_opt1:
+                st.info("Brak profili 1D.")
+            else:
+                group_options = ["Wszystkie grupy"] + [f"{k.profile} | {k.grade}" for k in bars_by_group_opt1.keys()]
+                selected_grp_str = st.selectbox("Wybierz grupę:", group_options, key="grp_opt1")
+                bars_filtered = bars_opt1 if selected_grp_str == "Wszystkie grupy" else bars_by_group_opt1[next(k for k in bars_by_group_opt1.keys() if f"{k.profile} | {k.grade}" == selected_grp_str)]
+                
+                fig_1d = plot_1d_cutting_plan(bars_filtered[:25], title_suffix=f"Opcja 1: {selected_grp_str}")
+                st.pyplot(fig_1d)
+                plt.close(fig_1d)
+
+        with tab_1d_opt2:
+            st.markdown("### 📏 Rozkrój Profili - Opcja 2 (Ze Stykiem)")
+            if not bars_opt2:
+                st.info("Brak profili 1D.")
+            else:
+                group_options2 = ["Wszystkie grupy"] + [f"{k.profile} | {k.grade}" for k in bars_by_group_opt2.keys()]
+                selected_grp_str2 = st.selectbox("Wybierz grupę:", group_options2, key="grp_opt2")
+                bars_filtered2 = bars_opt2 if selected_grp_str2 == "Wszystkie grupy" else bars_by_group_opt2[next(k for k in bars_by_group_opt2.keys() if f"{k.profile} | {k.grade}" == selected_grp_str2)]
+                
+                fig_1d2 = plot_1d_cutting_plan(bars_filtered2[:25], title_suffix=f"Opcja 2: {selected_grp_str2}")
+                st.pyplot(fig_1d2)
+                plt.close(fig_1d2)
+
+        with tab_2d_view:
+            st.markdown("### 📐 Wizualna Prezentacja Rozkroju Arkuszy Blach (2D Nesting)")
+            if not plates_result_all:
+                st.info("Brak formatek blach.")
+            else:
+                plate_choices = [f"Arkusz #{p.plate_id} - #{p.thickness:.0f}mm {p.grade} ({p.stock_w:.0f}×{p.stock_l:.0f})" for p in plates_result_all]
+                selected_p_idx = st.selectbox("Wybierz arkusz do podglądu:", range(len(plates_result_all)), format_func=lambda i: plate_choices[i])
+                fig_single = plot_2d_plate_plan(plates_result_all[selected_p_idx])
+                st.pyplot(fig_single)
+                plt.close(fig_single)
+
+        with tab_source:
+            st.markdown("### 📋 Zaimportowany BOM i Weryfikacja")
+            st.dataframe(df_clean, use_container_width=True)
+    else:
+        st.warning("⚠️ Wczytany plik nie zawiera prawidłowo zmapowanych danych o profilach lub jest pusty.")
 else:
     st.info("👈 Wgraj plik z zestawieniem materiałowym (BOM) lub kliknij **'🚀 Załaduj Testowy BOM'**, aby uruchomić podwójną optymalizację (Opcja 1 i Opcja 2).")
