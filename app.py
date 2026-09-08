@@ -748,6 +748,89 @@ def plot_1d_cutting_plan(bars: List[StockBar], title_suffix: str = "") -> plt.Fi
     plt.tight_layout()
     return fig
 
+def plot_2d_plate_plan(plate: StockPlate) -> plt.Figure:
+    """Rysuje techniczny rzut 2D pojedynczego arkusza blachy z naniesionymi formatkami i marginesami CNC."""
+    fig, ax = plt.subplots(figsize=(11, 5.2), dpi=120)
+
+    # Arkusz bazowy: Oś X = Długość L (stock_l), Oś Y = Szerokość W (stock_w)
+    sheet_rect = patches.Rectangle(
+        (0, 0), plate.stock_l, plate.stock_w,
+        linewidth=2.0, edgecolor="#1E293B", facecolor="#F8FAFC", linestyle="--"
+    )
+    ax.add_patch(sheet_rect)
+
+    colors = [
+        "#2563EB", "#0D9488", "#EA580C", "#9333EA", "#16A34A",
+        "#4F46E5", "#D97706", "#059669", "#DC2626", "#0891B2"
+    ]
+
+    for idx, item in enumerate(plate.packed_items):
+        color = colors[idx % len(colors)]
+        # item.y = współrzędna wzdłuż długości L (oś X)
+        # item.x = współrzędna wzdłuż szerokości W (oś Y)
+        # item.h = wymiar wzdłuż L (szerokość na osi X)
+        # item.w = wymiar wzdłuż W (wysokość na osi Y)
+        part_rect = patches.Rectangle(
+            (item.y, item.x), item.h, item.w,
+            linewidth=1.2, edgecolor="#0F172A", facecolor=color, alpha=0.88
+        )
+        ax.add_patch(part_rect)
+
+        # Czytelna etykieta detalu
+        if item.h > (plate.stock_l * 0.035) and item.w > (plate.stock_w * 0.04):
+            font_sz = 7.5 if (item.h > 400 and item.w > 200) else 6.0
+            label_text = f"{item.mark}\n{item.h:.0f}×{item.w:.0f}"
+            ax.text(
+                item.y + item.h / 2.0, item.x + item.w / 2.0,
+                label_text,
+                ha="center", va="center", color="white",
+                fontsize=font_sz, fontweight="bold"
+            )
+
+    eff_pct = (plate.used_area / (plate.stock_w * plate.stock_l) * 100.0) if (plate.stock_w * plate.stock_l) > 0 else 0.0
+    title_str = (
+        f"Arkusz #{plate.plate_id} ({plate.format_name or f'{plate.stock_w:.0f}×{plate.stock_l:.0f}'}) | "
+        f"Grubość: #{plate.thickness:.0f} mm | Gatunek: {plate.grade}\n"
+        f"Format: {plate.stock_w:.0f} × {plate.stock_l:.0f} mm | Detali: {len(plate.packed_items)} szt. | "
+        f"Efektywność nestingu: {eff_pct:.1f}% (Odpad: {(100.0 - eff_pct):.1f}%)"
+    )
+    ax.set_title(title_str, fontsize=10.0, fontweight="bold", pad=12)
+    ax.set_xlabel("Długość arkusza L [mm]", fontsize=9.0, fontweight="bold")
+    ax.set_ylabel("Szerokość arkusza B [mm]", fontsize=9.0, fontweight="bold")
+
+    margin_view = max(plate.stock_l, plate.stock_w) * 0.02
+    ax.set_xlim(-margin_view, plate.stock_l + margin_view)
+    ax.set_ylim(-margin_view, plate.stock_w + margin_view)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, linestyle=":", alpha=0.4)
+    plt.tight_layout()
+    return fig
+
+def build_excel_export(
+    procurement_df: pd.DataFrame,
+    cut_summary_1d: pd.DataFrame,
+    cut_summary_2d: pd.DataFrame,
+    stats_df: pd.DataFrame,
+    profile_stats_1d: Optional[pd.DataFrame] = None,
+    plate_stats_2d: Optional[pd.DataFrame] = None,
+) -> bytes:
+    """Buduje wielozakładkowy arkusz Excel (.xlsx) ze specyfikacją zamówieniową i kartami warsztatowymi."""
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        if procurement_df is not None and not procurement_df.empty:
+            procurement_df.to_excel(writer, sheet_name="1. Do Zamówienia (RFQ)", index=False)
+        if cut_summary_1d is not None and not cut_summary_1d.empty:
+            cut_summary_1d.to_excel(writer, sheet_name="2. Rozkrój Warsztat 1D", index=False)
+        if cut_summary_2d is not None and not cut_summary_2d.empty:
+            cut_summary_2d.to_excel(writer, sheet_name="3. Nesting Blach 2D", index=False)
+        if profile_stats_1d is not None and not profile_stats_1d.empty:
+            profile_stats_1d.to_excel(writer, sheet_name="4. Odpad wg Profili 1D", index=False)
+        if plate_stats_2d is not None and not plate_stats_2d.empty:
+            plate_stats_2d.to_excel(writer, sheet_name="5. Odpad wg Blach 2D", index=False)
+        if stats_df is not None and not stats_df.empty:
+            stats_df.to_excel(writer, sheet_name="6. Podsumowanie Kosztów", index=False)
+    return buffer.getvalue()
+
 st.title("🏗️ SteelOpt: Optymalizator Rozkroju i Generator RFQ")
 st.caption("Precyzyjne planowanie cięcia hutniczego | Izolacja gatunków stali | Generator Zamówień i Zapytania Ofertowego")
 
@@ -1208,6 +1291,15 @@ if df_raw is not None and not df_raw.empty:
         if not plates_result_all:
             st.info("Brak formatek blach w zaimportowanym zestawie.")
         else:
+            c_s1, c_s2, c_s3 = st.columns(3)
+            tot_sheets = len(plates_result_all)
+            tot_gross_m2 = sum((p.stock_w * p.stock_l) / 1_000_000.0 for p in plates_result_all)
+            tot_used_m2 = sum(p.used_area / 1_000_000.0 for p in plates_result_all)
+            avg_eff = (tot_used_m2 / tot_gross_m2 * 100.0) if tot_gross_m2 > 0 else 0.0
+            c_s1.metric("Liczba doborowych arkuszy", f"{tot_sheets} szt.")
+            c_s2.metric("Powierzchnia handlowa brutto", f"{tot_gross_m2:.2f} m²")
+            c_s3.metric("Wykorzystanie arkuszy (Yield)", f"{avg_eff:.1f}%", f"Odpad: {(100.0 - avg_eff):.1f}%")
+
             col_sel1, col_sel2 = st.columns([2, 1])
             with col_sel1:
                 plate_choices = [f"Arkusz #{p.plate_id} - #{p.thickness:.0f}mm {p.grade} ({p.stock_w:.0f}×{p.stock_l:.0f} mm)" for p in plates_result_all]
@@ -1216,10 +1308,13 @@ if df_raw is not None and not df_raw.empty:
                 show_all = st.checkbox("Pokaż wszystkie arkusze jeden pod drugim", value=False)
 
             if show_all:
-                for p in plates_result_all:
+                max_show = min(len(plates_result_all), 20)
+                for p in plates_result_all[:max_show]:
                     fig_p = plot_2d_plate_plan(p)
                     st.pyplot(fig_p)
                     plt.close(fig_p)
+                if len(plates_result_all) > max_show:
+                    st.caption(f"ℹ️ Wyświetlono pierwsze {max_show} z {len(plates_result_all)} arkuszy. Pojedyncze arkusze możesz przeglądać wybierając je z listy.")
             else:
                 curr_plate = plates_result_all[selected_plate_idx]
                 fig_single = plot_2d_plate_plan(curr_plate)
