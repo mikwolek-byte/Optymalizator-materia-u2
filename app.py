@@ -1160,4 +1160,4 @@ if df_raw is not None and not df_raw.empty:
 else:
     st.info("👈 Wgraj plik z zestawieniem materiałowym (BOM) lub kliknij **'🚀 Załaduj Testowy BOM'**, aby uruchomić podwójną optymalizację (Opcja 1 i Opcja 2).")
 
-```eof
+
