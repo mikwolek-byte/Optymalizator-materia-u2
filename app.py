@@ -56,7 +56,6 @@ EURO_PROFILE_WEIGHTS: Dict[str, float] = {
 }
 
 PROFILE_GEOMETRY: Dict[str, Tuple[float, float, float, float]] = {
-    # Geometria zapisana w krotce: (h [mm], b [mm], tw [mm], tf [mm]) wg norm
     "HEA240": (230.0, 240.0, 7.5, 12.0),
     "HEB600": (600.0, 300.0, 15.5, 30.0),
     "HEB800": (800.0, 300.0, 17.5, 33.0),
@@ -76,102 +75,6 @@ PROFILE_GEOMETRY: Dict[str, Tuple[float, float, float, float]] = {
     "IPE200": (200.0, 100.0, 5.6, 8.5),
     "IPE300": (300.0, 150.0, 7.1, 10.7),
 }
-
-def get_profile_geometry(profile_str: str) -> Tuple[float, float, float, float]:
-    """Pobiera parametry geometryczne dla znanego profilu lub estymuje je awaryjnie."""
-    p = str(profile_str).upper().replace(" ", "").replace("×", "X")
-    if p in PROFILE_GEOMETRY:
-        return PROFILE_GEOMETRY[p]
-    
-    # Próba oszacowania na podstawie samej wysokości w nazwie
-    m = re.search(r'(\d+)', p)
-    h_val = float(m.group(1)) if m else 300.0
-    return (h_val, h_val * 0.5, h_val * 0.03, h_val * 0.05)
-
-def get_weld_passes(thickness: float) -> int:
-    """Tabela doboru liczby ściegów w zależności od grubości łączonego elementu."""
-    if thickness <= 5.6: return 2
-    if thickness <= 7.9: return 3
-    if thickness <= 10.0: return 3
-    if thickness <= 15.0: return 4
-    if thickness <= 17.0: return 5
-    if thickness <= 20.0: return 6
-    if thickness <= 25.0: return 8
-    if thickness <= 30.0: return 12
-    if thickness <= 35.0: return 18
-    return 22
-
-def calculate_splicing_cost(profile: str, grade: str, c_rbh: float = 130.0) -> Dict[str, float]:
-    """Złożony algorytm inżynierski wyznaczający koszty wykonania złącza (styku warsztatowego)."""
-    h, b, tw, tf = get_profile_geometry(profile)
-    nw = get_weld_passes(tw)
-    nf = get_weld_passes(tf)
-
-    lw = 2.0 * (h / 1000.0)  # [mb] Długość złącza środnika (obustronnie)
-    lf = 2.0 * (b / 1000.0)  # [mb] Długość złącza pasów
-    l_styku = lw + lf         # [mb] Całkowita długość złącza do składania
-    l_ut = (h + 2.0 * b) / 1000.0 # [mb] Zewnętrzny obrys do badań nieniszczących UT
-
-    # Normy czasowe zgodnie z założeniami
-    t_ciecie = 20.0 # Stały czas cięcia/ukosowania (min)
-    t_skladanie = 15.0 * l_styku # Składanie: 15 min/mb
-    t_spaw_w = 20.0 * nw * lw # Spawanie środnika: 20 min/mb dla każdego ściegu
-    t_spaw_f = 20.0 * nf * lf # Spawanie pasów
-    
-    t_suma = t_ciecie + t_skladanie + t_spaw_w + t_spaw_f
-    t_rbh = t_suma / 60.0
-
-    k_rob = t_rbh * c_rbh
-    k_ut = l_ut * 70.0 # Zryczałtowana stawka za badania UT
-    k_styk = k_rob + k_ut
-
-    return {
-        "h": h, "b": b, "tw": tw, "tf": tf,
-        "nw": nw, "nf": nf,
-        "lw": lw, "lf": lf,
-        "l_styku": l_styku, "l_ut": l_ut,
-        "t_suma_min": t_suma,
-        "t_rbh": t_rbh,
-        "k_rob": k_rob,
-        "k_ut": k_ut,
-        "k_styk": k_styk
-    }
-
-def get_unit_weight_1d(profile_str: str) -> float:
-    """Zwraca masę 1 mb profilu w kg."""
-    raw = str(profile_str).upper().replace(" ", "").replace("×", "X").replace("*", "X").replace(",", ".")
-    
-    # Standaryzacja zapisu HE
-    m_he = re.match(r"^HE(\d+)([ABM])$", raw)
-    if m_he:
-        size, variant = m_he.groups()
-        raw = f"HE{variant}{size}"
-
-    clean_prof = re.sub(r'[^A-Z0-9]', '', raw)
-    for key, weight in EURO_PROFILE_WEIGHTS.items():
-        if key == clean_prof or clean_prof.startswith(key):
-            return weight
-
-    # Fallback dla kątowników
-    m_angle = re.search(r'(?:L|KAT|KĄT)?\s*(\d+(?:\.\d+)?)[X](\d+(?:\.\d+)?)(?:[X](\d+(?:\.\d+)?))?', raw)
-    if m_angle and any(prefix in raw for prefix in ["L", "KAT", "KĄT"]):
-        dim1 = float(m_angle.group(1))
-        dim2 = float(m_angle.group(2))
-        dim3 = float(m_angle.group(3)) if m_angle.group(3) else None
-        a, b, t = (dim1, dim2, dim3) if dim3 is not None else (dim1, dim1, dim2)
-        area_mm2 = (a + b - t) * t * 1.012
-        return round(area_mm2 * (STEEL_DENSITY_KG_M3 / 1_000_000.0), 2)
-
-    # Fallback dla profili zamkniętych kwadratowych i prostokątnych
-    m_rect = re.search(r'(?:CF)?(?:RHS|SHS|RK|RP|PR|PROFIL)?\s*(\d+(?:\.\d+)?)[X](\d+(?:\.\d+)?)(?:[X](\d+(?:\.\d+)?))?', raw)
-    if m_rect and any(prefix in raw for prefix in ["RHS", "SHS", "RK", "RP", "PROFIL", "CF"]):
-        h = float(m_rect.group(1))
-        b = float(m_rect.group(2))
-        t = float(m_rect.group(3)) if m_rect.group(3) else b
-        area_mm2 = 2.0 * t * (h + b) - 6.575 * (t ** 2)
-        return round(max(area_mm2, 100.0) * (STEEL_DENSITY_KG_M3 / 1_000_000.0), 2)
-
-    return 20.0 # Domyślna wartość w przypadku nierozpoznania profilu
 
 @dataclass(frozen=True)
 class ProfileGroupKey:
@@ -239,6 +142,42 @@ class StockPlate:
     scrap_area: float = 0.0
     format_name: str = ""
 
+def get_unit_weight_1d(profile_str: str) -> float:
+    """Zwraca masę 1 mb profilu w kg."""
+    raw = str(profile_str).upper().replace(" ", "").replace("×", "X").replace("*", "X").replace(",", ".")
+    
+    # Standaryzacja zapisu HE
+    m_he = re.match(r"^HE(\d+)([ABM])$", raw)
+    if m_he:
+        size, variant = m_he.groups()
+        raw = f"HE{variant}{size}"
+
+    clean_prof = re.sub(r'[^A-Z0-9]', '', raw)
+    for key, weight in EURO_PROFILE_WEIGHTS.items():
+        if key == clean_prof or clean_prof.startswith(key):
+            return weight
+
+    # Fallback dla kątowników
+    m_angle = re.search(r'(?:L|KAT|KĄT)?\s*(\d+(?:\.\d+)?)[X](\d+(?:\.\d+)?)(?:[X](\d+(?:\.\d+)?))?', raw)
+    if m_angle and any(prefix in raw for prefix in ["L", "KAT", "KĄT"]):
+        dim1 = float(m_angle.group(1))
+        dim2 = float(m_angle.group(2))
+        dim3 = float(m_angle.group(3)) if m_angle.group(3) else None
+        a, b, t = (dim1, dim2, dim3) if dim3 is not None else (dim1, dim1, dim2)
+        area_mm2 = (a + b - t) * t * 1.012
+        return round(area_mm2 * (STEEL_DENSITY_KG_M3 / 1_000_000.0), 2)
+
+    # Fallback dla profili zamkniętych kwadratowych i prostokątnych
+    m_rect = re.search(r'(?:CF)?(?:RHS|SHS|RK|RP|PR|PROFIL)?\s*(\d+(?:\.\d+)?)[X](\d+(?:\.\d+)?)(?:[X](\d+(?:\.\d+)?))?', raw)
+    if m_rect and any(prefix in raw for prefix in ["RHS", "SHS", "RK", "RP", "PROFIL", "CF"]):
+        h = float(m_rect.group(1))
+        b = float(m_rect.group(2))
+        t = float(m_rect.group(3)) if m_rect.group(3) else b
+        area_mm2 = 2.0 * t * (h + b) - 6.575 * (t ** 2)
+        return round(max(area_mm2, 100.0) * (STEEL_DENSITY_KG_M3 / 1_000_000.0), 2)
+
+    return 20.0 # Domyślna wartość w przypadku nierozpoznania profilu
+
 def normalize_grade(raw_grade: str) -> str:
     if not raw_grade or pd.isna(raw_grade) or str(raw_grade).strip().lower() in ['nan', 'none', '']:
         return "S355J2+N"
@@ -281,13 +220,27 @@ def optimize_1d_single_group(
     kerf: float = 4.5,
     trim_cut: float = 40.0,
     start_bar_id: int = 1,
+    enable_splicing: bool = False
 ) -> List[StockBar]:
     expanded_cuts: List[Tuple[str, float]] = []
-    for it in items:
-        for _ in range(it.quantity):
-            expanded_cuts.append((it.mark, float(it.length)))
+    
+    # Krok 2: Nowa logika stykowania - łączymy profile w jeden przed cięciem
+    if enable_splicing:
+        total_length = 0.0
+        combined_marks = []
+        for it in items:
+            for _ in range(it.quantity):
+                total_length += float(it.length)
+                combined_marks.append(it.mark)
+        
+        if total_length > 0:
+            combined_mark_str = "+".join(combined_marks)
+            expanded_cuts.append((combined_mark_str, total_length))
+    else:
+        for it in items:
+            for _ in range(it.quantity):
+                expanded_cuts.append((it.mark, float(it.length)))
 
-    # Sortowanie od najdłuższych cięć do najkrótszych (FFD)
     expanded_cuts.sort(key=lambda x: x[1], reverse=True)
     sorted_stocks = sorted(available_stocks)
     max_stock_avail = sorted_stocks[-1]
@@ -295,21 +248,59 @@ def optimize_1d_single_group(
 
     for mark, cut_len in expanded_cuts:
         if cut_len + trim_cut > max_stock_avail:
-            # Profil niestandardowy (zbyt długi, wymaga zamówienia specjalnego)
-            oversized_bar = StockBar(
-                bar_id=start_bar_id + len(stock_bars),
-                stock_length=cut_len + trim_cut,
-                profile=group_key.profile,
-                grade=group_key.grade,
-                used_length=cut_len,
-                cuts=[(mark, cut_len)],
-                kerf_total=0.0,
-                trim_total=trim_cut,
-                scrap_length=0.0,
-                is_oversized=True,
-            )
-            stock_bars.append(oversized_bar)
-            continue
+            if enable_splicing:
+                # Rozcinanie połączonego giganta na poszczególne sztangi
+                remaining_cut_len = cut_len
+                part_num = 1
+                while remaining_cut_len > 0:
+                    space_found = False
+                    for i, bar in enumerate(stock_bars):
+                        if bar.is_oversized: continue
+                        capacity_left = bar.stock_length - (bar.used_length + bar.trim_total)
+                        if capacity_left > 500.0:
+                             take_len = min(remaining_cut_len, capacity_left - kerf)
+                             bar.cuts.append((f"{mark}_cz{part_num}", take_len))
+                             bar.used_length += take_len + kerf
+                             bar.kerf_total += kerf
+                             bar.scrap_length = max(0.0, bar.stock_length - bar.used_length - bar.trim_total)
+                             remaining_cut_len -= take_len
+                             part_num += 1
+                             space_found = True
+                             break
+                    
+                    if not space_found:
+                        take_len = min(remaining_cut_len, max_stock_avail - trim_cut)
+                        new_bar = StockBar(
+                            bar_id=start_bar_id + len(stock_bars),
+                            stock_length=max_stock_avail,
+                            profile=group_key.profile,
+                            grade=group_key.grade,
+                            used_length=take_len,
+                            cuts=[(f"{mark}_cz{part_num}", take_len)],
+                            kerf_total=0.0,
+                            trim_total=trim_cut,
+                            scrap_length=max(0.0, max_stock_avail - take_len - trim_cut),
+                            is_oversized=False,
+                        )
+                        stock_bars.append(new_bar)
+                        remaining_cut_len -= take_len
+                        part_num += 1
+                continue
+            else:
+                oversized_bar = StockBar(
+                    bar_id=start_bar_id + len(stock_bars),
+                    stock_length=cut_len + trim_cut,
+                    profile=group_key.profile,
+                    grade=group_key.grade,
+                    used_length=cut_len,
+                    cuts=[(mark, cut_len)],
+                    kerf_total=0.0,
+                    trim_total=trim_cut,
+                    scrap_length=0.0,
+                    is_oversized=True,
+                )
+                stock_bars.append(oversized_bar)
+                continue
 
         best_bar_idx = -1
         min_remaining_space = float("inf")
@@ -381,7 +372,6 @@ def pack_single_sheet_shelf(
             if o_w > effective_w or o_l > effective_l:
                 continue
             
-            # Próba wstawienia elementu na istniejące półki
             for shelf in shelves:
                 if o_l <= shelf["height"] and (shelf["current_x"] + o_w) <= effective_w:
                     x = edge_margin + shelf["current_x"]
@@ -394,7 +384,6 @@ def pack_single_sheet_shelf(
             
             if placed: break
 
-            # Jeśli się nie udało, tworzymy nową półkę
             last_y_end = shelves[-1]["y"] + shelves[-1]["height"] + kerf_spacing if shelves else 0.0
             if (last_y_end + o_l) <= effective_l and o_w <= effective_w:
                 new_shelf = {"y": last_y_end, "height": o_l, "current_x": o_w + kerf_spacing}
@@ -427,7 +416,6 @@ def optimize_2d_single_group(
             l = max(float(it.width), float(it.length))
             parts.append((it.mark, w, l))
     
-    # Sortowanie malejąco wg pola powierzchni elementów
     parts.sort(key=lambda p: (p[1] * p[2]), reverse=True)
 
     if not parts or not available_formats:
@@ -479,7 +467,6 @@ def parse_bom_file(uploaded_file) -> pd.DataFrame:
     raw_bytes = uploaded_file.getvalue()
     prefix = raw_bytes[:1500].strip()
 
-    # Wsparcie dla XML Excel (starszy format oprogramowania CAD)
     if b'<?xml' in prefix or b'urn:schemas-microsoft-com:office:spreadsheet' in prefix:
         try:
             root = ET.fromstring(raw_bytes.strip())
@@ -651,7 +638,7 @@ def plot_2d_plate_plan(plate: StockPlate) -> plt.Figure:
     plt.tight_layout()
     return fig
 
-def build_excel_export(procurement_df, cut_summary_1d, cut_summary_2d, profile_stats_1d, plate_stats_2d, splicing_df, stats_df) -> bytes:
+def build_excel_export(procurement_df, cut_summary_1d, cut_summary_2d, profile_stats_1d, plate_stats_2d, stats_df) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         if procurement_df is not None and not procurement_df.empty:
@@ -664,14 +651,12 @@ def build_excel_export(procurement_df, cut_summary_1d, cut_summary_2d, profile_s
             profile_stats_1d.to_excel(writer, sheet_name="4. Odpad wg Profili 1D", index=False)
         if plate_stats_2d is not None and not plate_stats_2d.empty:
             plate_stats_2d.to_excel(writer, sheet_name="5. Odpad wg Blach 2D", index=False)
-        if splicing_df is not None and not splicing_df.empty:
-            splicing_df.to_excel(writer, sheet_name="6. Analiza Stykowania", index=False)
         if stats_df is not None and not stats_df.empty:
-            stats_df.to_excel(writer, sheet_name="7. Podsumowanie Kosztów", index=False)
+            stats_df.to_excel(writer, sheet_name="6. Podsumowanie Kosztów", index=False)
     return buffer.getvalue()
 
-st.title("🏗️ SteelOpt: Optymalizator Rozkroju i Generator RFQ + Stykowanie")
-st.caption("Zaawansowane planowanie hutnicze | Izolacja gatunków stali | Opcjonalne Stykowanie Profili")
+st.title("🏗️ SteelOpt: Optymalizator Rozkroju i Generator RFQ")
+st.caption("Zaawansowane planowanie hutnicze | Izolacja gatunków stali | Optymalne Stykowanie Profili")
 
 if "bom_data" not in st.session_state:
     st.session_state["bom_data"] = None
@@ -691,13 +676,12 @@ with st.sidebar:
         stock_options_1d = [12100.0]
 
     st.divider()
-    st.subheader("🔗 Moduł Opcjonalnego Stykowania Profili")
+    st.subheader("🔗 Moduł Stykowania Profili")
     enable_splicing = st.checkbox(
-        "Zezwalaj na stykowanie profili (Weld Splicing)",
+        "Zezwalaj na stykowanie profili",
         value=False,
-        help="Analizuje opłacalność (BEP) łączenia krótszych odcinków spawaniem doczołowym zamiast zakupu nowych sztang."
+        help="Skupia i łączy poszczególne elementy o identycznym przekroju i gatunku w jedną, długą sztangę, optymalizując odpady cięcia."
     )
-    splicing_rbh_rate = st.number_input("Stawka roboczogodziny spawania [PLN/h]", min_value=50.0, max_value=300.0, value=130.0, step=10.0)
 
     st.divider()
     st.subheader("Parametry Rozkroju 2D (Arkusze)")
@@ -798,12 +782,11 @@ if df_raw is not None and not df_raw.empty:
     bars_by_group: Dict[ProfileGroupKey, List[StockBar]] = {}
     order_items_unified: List[Dict] = []
     profile_waste_summary_1d: List[Dict] = []
-    splicing_analysis_rows: List[Dict] = []
 
     bar_id_counter = 1
     # Optymalizacja 1D per grupa profili
     for group_key, group_items in grouped_1d_dict.items():
-        bars = optimize_1d_single_group(group_key, group_items, stock_options_1d, kerf=kerf_1d, trim_cut=trim_1d, start_bar_id=bar_id_counter)
+        bars = optimize_1d_single_group(group_key, group_items, stock_options_1d, kerf=kerf_1d, trim_cut=trim_1d, start_bar_id=bar_id_counter, enable_splicing=enable_splicing)
         bar_id_counter += len(bars)
         bars_result_all.extend(bars)
         bars_by_group[group_key] = bars
@@ -835,7 +818,6 @@ if df_raw is not None and not df_raw.empty:
         sub_scrap_mass_kg = sub_scrap_len_m * unit_wt
         sub_scrap_pct = ((sub_purchased_len - sub_netto_len) / sub_purchased_len * 100.0) if sub_purchased_len > 0 else 0.0
 
-        # Zabezpieczenie przed brakiem "Masa netto [kg]" itp.
         profile_waste_summary_1d.append({
             "Profil": group_key.profile,
             "Gatunek": group_key.grade,
@@ -843,29 +825,11 @@ if df_raw is not None and not df_raw.empty:
             "Liczba sztang [szt.]": len(bars),
             "Długość netto [m]": round(sub_netto_len / 1000.0, 2),
             "Długość brutto [m]": round(sub_purchased_len / 1000.0, 2),
-            "Masa netto [kg]": round(sub_netto_mass, 1),        # Klucz naprawiony!
-            "Masa brutto [kg]": round(sub_purchased_mass, 1),   # Klucz naprawiony!
+            "Masa netto [kg]": round(sub_netto_mass, 1),
+            "Masa brutto [kg]": round(sub_purchased_mass, 1),
             "Odpad [kg]": round(sub_scrap_mass_kg, 1),
             "Odpad [%]": round(sub_scrap_pct, 2),
         })
-
-        # Splicing analysis for profile group (BEP Calc)
-        if enable_splicing:
-            s_cost = calculate_splicing_cost(group_key.profile, group_key.grade, c_rbh=splicing_rbh_rate)
-            delta_c_mat = price_profile_per_kg - scrap_price_per_kg
-            bep_kg = s_cost["k_styk"] / delta_c_mat if delta_c_mat > 0 else 0.0
-            bep_m = bep_kg / unit_wt if unit_wt > 0 else 0.0
-            splicing_analysis_rows.append({
-                "Profil": group_key.profile,
-                "Gatunek": group_key.grade,
-                "Masa 1mb [kg/m]": round(unit_wt, 2),
-                "Czas styku [min]": round(s_cost["t_suma_min"], 1),
-                "Koszt robocizny [PLN]": round(s_cost["k_rob"], 2),
-                "Koszt badań UT [PLN]": round(s_cost["k_ut"], 2),
-                "Koszt całkowity styku [PLN]": round(s_cost["k_styk"], 2),
-                "Próg opłacalności (BEP) [kg]": round(bep_kg, 1),
-                "Próg opłacalności (BEP) [m]": round(bep_m, 2),
-            })
 
     plates_result_all: List[StockPlate] = []
     plates_by_group: Dict[PlateGroupKey, List[StockPlate]] = {}
@@ -908,7 +872,6 @@ if df_raw is not None and not df_raw.empty:
         sub_waste_pct = ((sub_gross_area_m2 - sub_net_area_m2) / sub_gross_area_m2 * 100.0) if sub_gross_area_m2 > 0 else 0.0
         format_summary_str = ", ".join([f"{cnt}× ({f_w:.0f}×{f_l:.0f})" for (f_w, f_l, _), cnt in format_aggregation.items()])
 
-        # Zabezpieczenie przed brakiem "Masa netto [kg]" itp.
         plate_waste_summary_2d.append({
             "Grubość [mm]": group_key.thickness,
             "Gatunek": group_key.grade,
@@ -916,17 +879,16 @@ if df_raw is not None and not df_raw.empty:
             "Dobrane formaty": format_summary_str,
             "Powierzchnia netto [m²]": round(sub_net_area_m2, 2),
             "Powierzchnia brutto [m²]": round(sub_gross_area_m2, 2),
-            "Masa netto [kg]": round(sub_net_mass_kg, 1),        # Klucz naprawiony!
-            "Masa brutto [kg]": round(sub_gross_mass_kg, 1),     # Klucz naprawiony!
+            "Masa netto [kg]": round(sub_net_mass_kg, 1),
+            "Masa brutto [kg]": round(sub_gross_mass_kg, 1),
             "Odpad [kg]": round(sub_waste_mass_kg, 1),
             "Odpad [%]": round(sub_waste_pct, 2),
         })
 
-    tab_procure, tab_1d_view, tab_2d_view, tab_splice, tab_source = st.tabs([
+    tab_procure, tab_1d_view, tab_2d_view, tab_source = st.tabs([
         "🛒 Zestawienie (RFQ)",
         "📏 Rozkrój Profili (1D)",
         "📐 Nesting Blach (2D)",
-        "🔗 Analiza Stykowania",
         "📋 Zaimportowany BOM",
     ])
 
@@ -957,16 +919,18 @@ if df_raw is not None and not df_raw.empty:
             c_q3.metric("Masa Odpadu Hutniczego", f"{total_waste_kg:,.1f} kg")
             c_q4.metric("Odzysk ze Złomu", f"{scrap_revenue:,.2f} PLN", f"netto: {net_steel_cost:,.2f} PLN")
 
-            st.markdown("#### 📑 Specyfikacja Pozycji do Zamówienia:")
-            st.dataframe(df_order.style.format({"Masa Jednostkowa [kg]": "{:,.1f} kg", "Masa Łączna [kg]": "{:,.1f} kg"}), use_container_width=True)
-
             st.markdown("#### ✉️ Gotowa treść zapytania ofertowego (E-mail)")
-            email_body = "Dzień dobry,\n\nProszę o przygotowanie oferty cenowej oraz podanie dostępności dla poniższego zestawienia wyrobów hutniczych:\n\n"
-            for _, row in df_order.iterrows():
-                email_body += f"• {row['Asortyment']} | Gatunek: {row['Gatunek Stali']} | {row['Wymiar Handlowy']} | Ilość: {row['Ilość Zamawiana [szt.]']} szt.\n"
-            email_body += "\nWymagania dodatkowe:\n- Atest materiałowy 3.1 (PN-EN 10204) dla wszystkich powyższych pozycji.\n- Proszę o uwzględnienie kosztów transportu.\n\nPozdrawiam,\n[Twój Podpis]"
+            email_body = (
+                "Dzień dobry,\n\n"
+                "Proszę o przygotowanie oferty cenowej oraz podanie dostępności dla wyrobów hutniczych, "
+                "zgodnie z zestawieniem w załączonym pliku Excel.\n\n"
+                "Wymagania dodatkowe:\n"
+                "- Atest materiałowy 3.1 (PN-EN 10204) dla wszystkich zamawianych pozycji.\n"
+                "- Proszę o uwzględnienie kosztów transportu.\n\n"
+                "Pozdrawiam,\n[Twój Podpis]"
+            )
             
-            st.text_area("Skopiuj poniższy tekst i wyślij do dystrybutora / hurtowni stali:", value=email_body, height=250)
+            st.text_area("Skopiuj poniższy tekst i wyślij do dystrybutora wraz z plikiem Excel:", value=email_body, height=200)
 
             workshop_1d_rows = []
             for b in bars_result_all:
@@ -993,7 +957,6 @@ if df_raw is not None and not df_raw.empty:
                 cut_summary_2d=df_workshop_2d,
                 profile_stats_1d=pd.DataFrame(profile_waste_summary_1d),
                 plate_stats_2d=pd.DataFrame(plate_waste_summary_2d),
-                splicing_df=pd.DataFrame(splicing_analysis_rows) if splicing_analysis_rows else None,
                 stats_df=df_stats
             )
 
@@ -1031,17 +994,6 @@ if df_raw is not None and not df_raw.empty:
             fig_single = plot_2d_plate_plan(plates_result_all[selected_p_idx])
             st.pyplot(fig_single)
             plt.close(fig_single)
-
-    with tab_splice:
-        st.markdown("### 🔗 Analiza Opłacalności Stykowania Profili (Weld Splicing)")
-        if not enable_splicing:
-            st.warning("⚠️ Moduł stykowania jest obecnie wyłączony. Włącz opcję **'Zezwalaj na stykowanie profili'** w panelu bocznym, aby uruchomić kalkulację złączy.")
-        else:
-            if splicing_analysis_rows:
-                st.info("Poniższa tabela przedstawia inżynierską kalkulację kosztów wykonania styku spawanego (cięcie, składanie, spawanie wielościegowe, badania UT) oraz minimalny próg opłacalności długościowej profilu, przy którym wykonanie złącza (zamiast cięcia z nowej sztangi) staje się ekonomicznie rentowne (Break-Even Point). Obliczenia poprawnie identyfikują profil HEA 240 oraz dynamicznie odliczają długości spawu na podstawie gabarytów (zgodnie z korektą).")
-                st.dataframe(pd.DataFrame(splicing_analysis_rows), use_container_width=True)
-            else:
-                st.info("Brak profili do analizy stykowania.")
 
     with tab_source:
         st.markdown("### 📋 Zaimportowany BOM i Weryfikacja")
