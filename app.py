@@ -217,7 +217,11 @@ def get_unit_weight_1d(profile_str: str) -> float:
         raw = f"HE{variant}{size}"
 
     clean_prof = re.sub(r'[^A-Z0-9]', '', raw)
-    for key, weight in EURO_PROFILE_WEIGHTS.items():
+    
+    # FIX: Wyciągamy klucze słownika i sortujemy wg. długości opadająco
+    # Zapobiega to sytuacji w której HEA1000 pasuje pod krótki wzorzec "HEA100"
+    for key in sorted(EURO_PROFILE_WEIGHTS.keys(), key=len, reverse=True):
+        weight = EURO_PROFILE_WEIGHTS[key]
         if key == clean_prof or clean_prof.startswith(key):
             return weight
 
@@ -641,7 +645,8 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
             col_map[col] = 'profile'
         elif any(k in c_clean for k in ['materiał', 'material', 'gatunek', 'grade', 'güte']) and 'grade' not in col_map.values():
             col_map[col] = 'grade'
-        elif any(k in c_clean for k in ['ilość', 'ilosc', 'quantity', 'qty', 'szt', 'stk']) and 'qty' not in col_map.values():
+        # FIX: Dodane wykluczenie słów kluczowych oznaczających wagę (masa, kg, ciężar, itp.)
+        elif any(k in c_clean for k in ['ilość', 'ilosc', 'quantity', 'qty', 'szt', 'stk']) and not any(k in c_clean for k in ['masa', 'ciężar', 'ciezar', 'weight', 'gewicht', 'kg', '/']) and 'qty' not in col_map.values():
             col_map[col] = 'qty'
         elif any(k in c_clean for k in ['długość', 'dlugosc', 'length', 'l [mm]', 'länge']) and not any(k in c_clean for k in ['całk', 'total', 'ges.']) and 'length' not in col_map.values():
             col_map[col] = 'length'
@@ -652,9 +657,7 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     df_ren = df.rename(columns=col_map)
     
-    # Bezpieczne sprawdzenie czy wymagane kolumny zostały zmapowane
     if 'profile' not in df_ren.columns:
-        # Fallback: spróbuj znaleźć pierwszą kolumnę zawierającą teksty profili
         for c in df_ren.columns:
             sample_vals = df_ren[c].astype(str).head(5).str.upper()
             if any(any(p in val for p in ['IPE', 'HEA', 'HEB', 'HEM', 'BL', 'PL']) for val in sample_vals):
@@ -708,7 +711,7 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
                     "thick": t if t > 0 else 10.0,
                     "qty": q,
                 })
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError):
             continue
     return pd.DataFrame(clean_rows)
 
