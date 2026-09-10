@@ -44,6 +44,8 @@ EURO_PROFILE_WEIGHTS: Dict[str, float] = {
     "UNP180": 22.0, "UNP200": 25.3, "UNP220": 29.4, "UNP240": 33.2, "UNP260": 37.9,
     "UNP280": 41.8, "UNP300": 46.2, "UNP320": 59.5, "UNP350": 60.6, "UNP380": 63.1,
     "UNP400": 71.8,
+    "UPE160": 17.0, "UPE180": 19.7, "UPE200": 22.8, "UPE220": 26.6, 
+    "UPE240": 30.2, "UPE270": 35.2, "UPE300": 44.4, "UPE330": 53.2
 }
 
 PROFILE_DIMENSIONS: Dict[str, Tuple[float, float, float, float]] = {
@@ -218,11 +220,9 @@ def get_unit_weight_1d(profile_str: str) -> float:
 
     clean_prof = re.sub(r'[^A-Z0-9]', '', raw)
     
-    # FIX: Wyciągamy klucze słownika i sortujemy wg. długości opadająco
-    # Zapobiega to sytuacji w której HEA1000 pasuje pod krótki wzorzec "HEA100"
     for key in sorted(EURO_PROFILE_WEIGHTS.keys(), key=len, reverse=True):
         weight = EURO_PROFILE_WEIGHTS[key]
-        if key == clean_prof or clean_prof.startswith(key):
+        if key == clean_prof or key in clean_prof:
             return weight
 
     m_angle = re.search(r'(?:L|KAT|KĄT)?\s*(\d+(?:\.\d+)?)[X](\d+(?:\.\d+)?)(?:[X](\d+(?:\.\d+)?))?', raw)
@@ -241,6 +241,13 @@ def get_unit_weight_1d(profile_str: str) -> float:
         t = float(m_rect.group(3)) if m_rect.group(3) else b
         area_mm2 = 2.0 * t * (h + b) - 6.575 * (t ** 2)
         return round(max(area_mm2, 100.0) * (STEEL_DENSITY_KG_M3 / 1_000_000.0), 2)
+
+    m_pipe = re.search(r'(?:RURA|ROHR|RO|CHS|FI|PIPE)?\s*(\d+(?:\.\d+)?)[X](\d+(?:\.\d+)?)', raw)
+    if m_pipe and any(prefix in raw for prefix in ["RURA", "ROHR", "RO", "CHS", "FI", "PIPE"]):
+        d = float(m_pipe.group(1))
+        t = float(m_pipe.group(2))
+        area_mm2 = math.pi * (d - t) * t
+        return round(area_mm2 * (STEEL_DENSITY_KG_M3 / 1_000_000.0), 2)
 
     return 20.0 
 
@@ -263,6 +270,8 @@ def normalize_profile(raw_profile: str) -> str:
     if m_he:
         size, variant = m_he.groups()
         p = f"HE{variant}{size}"
+        
+    p = p.replace("UPN", "UNP")
     return p
 
 def group_1d_items_by_material(items: List[Item1D]) -> Dict[ProfileGroupKey, List[Item1D]]:
@@ -602,7 +611,7 @@ def parse_bom_file(uploaded_file) -> pd.DataFrame:
             header_idx = None
             for idx, r in raw_df.iterrows():
                 row_str = " ".join([str(v).lower() for v in r if v is not None])
-                if "profil" in row_str or "profile" in row_str:
+                if "profil" in row_str or "profile" in row_str or "position" in row_str or "pozycja" in row_str:
                     header_idx = idx
                     break
             if header_idx is not None:
@@ -618,7 +627,7 @@ def parse_bom_file(uploaded_file) -> pd.DataFrame:
             h_idx = 0
             for idx, r in df_temp.iterrows():
                 row_str = " ".join([str(v).lower() for v in r if v is not None])
-                if "profil" in row_str or "profile" in row_str or "position" in row_str or "długość" in row_str or "length" in row_str or "länge" in row_str:
+                if any(keyword in row_str for keyword in ["profil", "profile", "position", "długość", "length", "länge"]):
                     h_idx = idx
                     break
             df_temp.columns = [str(c).strip() for c in df_temp.iloc[h_idx]]
@@ -643,16 +652,15 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
             col_map[col] = 'mark'
         elif any(k in c_clean for k in ['profil', 'profile', 'przekrój', 'section']) and 'profile' not in col_map.values():
             col_map[col] = 'profile'
-        elif any(k in c_clean for k in ['materiał', 'material', 'gatunek', 'grade', 'güte']) and 'grade' not in col_map.values():
+        elif any(k in c_clean for k in ['materiał', 'material', 'gatunek', 'grade', 'güte', 'klasse']) and 'grade' not in col_map.values():
             col_map[col] = 'grade'
-        # FIX: Dodane wykluczenie słów kluczowych oznaczających wagę (masa, kg, ciężar, itp.)
-        elif any(k in c_clean for k in ['ilość', 'ilosc', 'quantity', 'qty', 'szt', 'stk']) and not any(k in c_clean for k in ['masa', 'ciężar', 'ciezar', 'weight', 'gewicht', 'kg', '/']) and 'qty' not in col_map.values():
+        elif any(k in c_clean for k in ['ilość', 'ilosc', 'quantity', 'qty', 'szt', 'stk', 'menge']) and not any(k in c_clean for k in ['masa', 'ciężar', 'ciezar', 'weight', 'gewicht', 'kg']) and 'qty' not in col_map.values():
             col_map[col] = 'qty'
         elif any(k in c_clean for k in ['długość', 'dlugosc', 'length', 'l [mm]', 'länge']) and not any(k in c_clean for k in ['całk', 'total', 'ges.']) and 'length' not in col_map.values():
             col_map[col] = 'length'
-        elif any(k in c_clean for k in ['szerokość', 'szerokosc', 'width', 'b [mm]']) and not any(k in c_clean for k in ['całk', 'total']) and 'width' not in col_map.values():
+        elif any(k in c_clean for k in ['szerokość', 'szerokosc', 'width', 'b [mm]', 'breite']) and not any(k in c_clean for k in ['całk', 'total']) and 'width' not in col_map.values():
             col_map[col] = 'width'
-        elif any(k in c_clean for k in ['grubość', 'grubosc', 'thick', 't [mm]']) and 'thick' not in col_map.values():
+        elif any(k in c_clean for k in ['grubość', 'grubosc', 'thick', 't [mm]', 'dicke']) and 'thick' not in col_map.values():
             col_map[col] = 'thick'
 
     df_ren = df.rename(columns=col_map)
@@ -674,8 +682,11 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
         len_val = str(row.get('length', '0')).strip()
         qty_val = str(row.get('qty', '1')).strip()
 
-        if any(w in mark_val.lower() for w in ['suma', 'total', 'summe']) or any(w in len_val.lower() for w in ['suma', 'total', 'summe']):
+        if any(w in mark_val.lower() for w in ['suma', 'total', 'summe', 'zwischensumme']) or \
+           any(w in len_val.lower() for w in ['suma', 'total', 'summe', 'zwischensumme']) or \
+           any(w in prof_val.lower() for w in ['suma', 'total', 'summe', 'zwischensumme']):
             continue
+            
         if prof_val in ['', 'None', 'nan', 'nat']:
             continue
 
@@ -691,9 +702,9 @@ def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
             
             grd = str(row.get('grade', 'S355J2+N')).strip()
 
-            is_plate_profile = any(p_sub in prof_val.upper() for p_sub in ["PL", "BL", "BLACHA", "#", "-"])
+            is_plate_profile = any(p_sub in prof_val.upper() for p_sub in ["PL", "BL", "BLACHA", "#"])
             if (w == 0.0 or t == 0.0) and is_plate_profile:
-                m_dim = re.search(r'(?:PL|BL|BLACHA|#|-)?\s*(\d+(?:\.\d+)?)\s*[\*Xx]\s*(\d+(?:\.\d+)?)', prof_val.upper())
+                m_dim = re.search(r'(?:PL|BL|BLACHA|#)?\s*(\d+(?:\.\d+)?)\s*[\*Xx]\s*(\d+(?:\.\d+)?)', prof_val.upper())
                 if m_dim:
                     t = float(m_dim.group(1))
                     w = float(m_dim.group(2))
@@ -912,6 +923,9 @@ if df_raw is not None and not df_raw.empty:
         profile_waste_1d_opt1, profile_waste_1d_opt2 = [], []
         global_oversized_opt1 = set()
 
+        total_net_mass_1d = 0.0
+        total_net_mass_2d = 0.0
+
         bar_id_1, bar_id_2 = 1, 1
         total_splice_count_opt2 = 0
         total_splice_cost_opt2 = 0.0
@@ -921,6 +935,8 @@ if df_raw is not None and not df_raw.empty:
             unit_wt = get_unit_weight_1d(group_key.profile)
             sub_netto_len = sum(it.length * it.quantity for it in group_items)
             sub_netto_mass = (sub_netto_len / 1000.0) * unit_wt
+            
+            total_net_mass_1d += sub_netto_mass
 
             def calc_1d_scenario(enable_splice, bar_id_start):
                 bars, oversized_elements, splice_count = optimize_1d_single_group(
@@ -1006,6 +1022,11 @@ if df_raw is not None and not df_raw.empty:
             sub_gross_area_m2 = sum((pl.stock_w * pl.stock_l) / 1_000_000.0 for pl in plates)
             sub_net_area_m2 = sum((it.width * it.length * it.quantity) for it in group_items) / 1_000_000.0
 
+            sub_gross_mass_kg = sub_gross_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
+            sub_net_mass_kg = sub_net_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
+            
+            total_net_mass_2d += sub_net_mass_kg
+
             for (f_w, f_l, f_name), count_sheets in format_aggregation.items():
                 single_sheet_area = (f_w * f_l) / 1_000_000.0
                 single_mass_kg = single_sheet_area * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
@@ -1021,8 +1042,6 @@ if df_raw is not None and not df_raw.empty:
                     "Wymagany Atest": "3.1 wg PN-EN 10204",
                 })
 
-            sub_gross_mass_kg = sub_gross_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
-            sub_net_mass_kg = sub_net_area_m2 * group_key.thickness * (STEEL_DENSITY_KG_M3 / 1000.0)
             sub_waste_mass_kg = max(0.0, sub_gross_mass_kg - sub_net_mass_kg)
             sub_waste_pct = ((sub_gross_area_m2 - sub_net_area_m2) / sub_gross_area_m2 * 100.0) if sub_gross_area_m2 > 0 else 0.0
             format_summary_str = ", ".join([f"{cnt}× ({f_w:.0f}×{f_l:.0f})" for (f_w, f_l, _), cnt in format_aggregation.items()])
@@ -1054,15 +1073,23 @@ if df_raw is not None and not df_raw.empty:
             if global_oversized_opt1:
                 st.warning(f"⚠️ **Wymagana Akceptacja Technologiczna (dla Opcji 1):** Następujące pozycje przekraczały maksymalne długości handlowe (np. 15.1m lub 12.0m) i zostały automatycznie podzielone na krótsze odcinki, aby zmieścić się w bazowych sztangach: **{', '.join(global_oversized_opt1)}**. Prosimy o potwierdzenie proponowanego podziału u Klienta.")
             
+            total_net_mass = total_net_mass_1d + total_net_mass_2d
+            
             order_opt1 = order_items_1d_opt1 + order_items_2d
             df_order_opt1 = pd.DataFrame(order_opt1)
             mass_opt1 = df_order_opt1["Masa Łączna [kg]"].sum() if not df_order_opt1.empty else 0
+            waste_kg_opt1 = max(0.0, mass_opt1 - total_net_mass)
+            waste_pct_opt1 = (waste_kg_opt1 / mass_opt1 * 100.0) if mass_opt1 > 0 else 0.0
+            
             material_cost_opt1 = (sum(r["Masa Łączna [kg]"] for r in order_items_1d_opt1) * price_profile_per_kg) + (sum(r["Masa Łączna [kg]"] for r in order_items_2d) * price_plate_per_kg)
             cost_opt1 = material_cost_opt1
 
             order_opt2 = order_items_1d_opt2 + order_items_2d
             df_order_opt2 = pd.DataFrame(order_opt2)
             mass_opt2 = df_order_opt2["Masa Łączna [kg]"].sum() if not df_order_opt2.empty else 0
+            waste_kg_opt2 = max(0.0, mass_opt2 - total_net_mass)
+            waste_pct_opt2 = (waste_kg_opt2 / mass_opt2 * 100.0) if mass_opt2 > 0 else 0.0
+            
             material_cost_opt2 = (sum(r["Masa Łączna [kg]"] for r in order_items_1d_opt2) * price_profile_per_kg) + (sum(r["Masa Łączna [kg]"] for r in order_items_2d) * price_plate_per_kg)
             cost_opt2 = material_cost_opt2 + total_splice_cost_opt2
 
@@ -1070,13 +1097,17 @@ if df_raw is not None and not df_raw.empty:
                 col1, col2 = st.columns(2)
                 with col1:
                     st.info(f"**Opcja 1 (Wariant A: Bez Styku)**\n\n"
+                            f"Masa netto elementów: **{total_net_mass/1000.0:.2f} t**\n"
                             f"Masa brutto zamówienia: **{mass_opt1/1000.0:.2f} t**\n"
+                            f"Odpad całkowity: **{waste_kg_opt1/1000.0:.2f} t ({waste_pct_opt1:.1f}%)**\n"
                             f"Koszt materiału brutto: {material_cost_opt1:,.2f} PLN\n"
                             f"---\n"
                             f"**Szacowany koszt CAŁKOWITY: {cost_opt1:,.2f} PLN**")
                 with col2:
                     st.success(f"**Opcja 2 (Wariant B: Ze Stykiem)**\n\n"
+                               f"Masa netto elementów: **{total_net_mass/1000.0:.2f} t**\n"
                                f"Masa brutto zamówienia: **{mass_opt2/1000.0:.2f} t**\n"
+                               f"Odpad całkowity: **{waste_kg_opt2/1000.0:.2f} t ({waste_pct_opt2:.1f}%)**\n"
                                f"Koszt materiału brutto: {material_cost_opt2:,.2f} PLN\n"
                                f"Liczba wykonanych styków (zgodnych): {total_splice_count_opt2} szt.\n"
                                f"Koszt wykonania styków (robocizna + UT): {total_splice_cost_opt2:,.2f} PLN\n"
